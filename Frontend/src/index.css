@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+  background-color: #355C7D; /* Fondo azul oscuro de tu paleta */
+  font-family: system-ui, -apple-system, sans-serif;
+}
