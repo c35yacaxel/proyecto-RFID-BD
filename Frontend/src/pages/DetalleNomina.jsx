@@ -56,7 +56,7 @@ const DetalleNomina = () => {
 
             const idsEmpleados = empData.map(e => e.id_empleado);
 
-            // 3. Asistencias del mes completo (abarca tanto quincenales como mensuales)
+            // 3. Asistencias del mes completo
             const { data: asistencias, error: errAsis } = await supabase
                 .from('registrosasistencia')
                 .select('id_empleado, fecha')
@@ -96,65 +96,85 @@ const DetalleNomina = () => {
                     const modo      = emp.tipo_pago?.trim().toLowerCase();
                     const esMensual = modo === 'mensual';
 
-                    /*
-                     * REGLAS DE PERÍODO Y SUELDO BASE:
-                     *
-                     * Mensual (fin de mes)  → del 1 al último día del mes
-                     *                         diasBase = días del mes, sueldo completo
-                     *
-                     * Quincenal día 15      → del 1 al 15
-                     *                         diasBase = 15
-                     *
-                     * Quincenal fin de mes  → del 16 al último
-                     *                         diasBase = últimoDia - 15
-                     */
                     const periodoInicio = esMensual
                         ? fechaInicioMes
                         : diaCorte === 15
                             ? fechaInicioMes
                             : fechaInicioQ2;
 
-                    // Quincenales SIEMPRE dividen entre 15 (ambas quincenas)
-                    // Mensuales dividen entre los días reales del mes
-                    const diasBase = esMensual ? ultimoDia : 15;
-
+                    const diasBase  = esMensual ? ultimoDia : 15;
                     const pagoDiario = emp.sueldo_base / diasBase;
 
-                    // Generar lista de fechas del período de este empleado
+                    const asistiosDias = asisMap[emp.id_empleado] || new Set();
+
+                    // ── CORRECCIÓN PRINCIPAL ──────────────────────────────
+                    // Si el empleado no tiene ninguna asistencia → Q0
+                    if (asistiosDias.size === 0) {
+                        return {
+                            ...emp,
+                            diasBase,
+                            diasPeriodo:     0,
+                            diasContados:    0,
+                            totalHorasExtra: 0,
+                            montoHorasExtra: 0,
+                            totalCalculado:  0,
+                            pagoDiario:      Math.round(pagoDiario * 100) / 100,
+                            primerDia:       null,
+                        };
+                    }
+
+                    // Encontrar la primera asistencia real dentro del período
+                    const fechasPeriodo = [...asistiosDias]
+                        .filter(f => f >= periodoInicio && f <= fechaFin)
+                        .sort();
+
+                    // Si no tiene asistencias dentro del período → Q0
+                    if (fechasPeriodo.length === 0) {
+                        return {
+                            ...emp,
+                            diasBase,
+                            diasPeriodo:     0,
+                            diasContados:    0,
+                            totalHorasExtra: 0,
+                            montoHorasExtra: 0,
+                            totalCalculado:  0,
+                            pagoDiario:      Math.round(pagoDiario * 100) / 100,
+                            primerDia:       null,
+                        };
+                    }
+
+                    // El período real empieza desde su primera asistencia
+                    const primerDiaReal = fechasPeriodo[0];
+
+                    // Generar lista de fechas DESDE la primera asistencia real
                     const diasDelPeriodo = [];
-                    const dInicio = new Date(periodoInicio + 'T00:00:00');
+                    const dInicio = new Date(primerDiaReal + 'T00:00:00');
                     const dFin    = new Date(fechaFin      + 'T00:00:00');
                     for (let d = new Date(dInicio); d <= dFin; d.setDate(d.getDate() + 1)) {
                         diasDelPeriodo.push(new Date(d).toISOString().split('T')[0]);
                     }
 
-                    const asistiosDias        = asisMap[emp.id_empleado] || new Set();
-                    const trabajoAlMenosUnDia = asistiosDias.size > 0;
-
-                    /*
-                     * DÍAS CONTADOS:
-                     * - Asistió ese día                              → cuenta
-                     * - Es su día de descanso Y trabajó ≥ 1 día     → cuenta (día pagado)
-                     * - No tiene ninguna asistencia en el período    → todo 0, Q0.00
-                     */
+                    // Contar días: asistió O es día de descanso (dentro del período real)
                     let diasContados = 0;
                     diasDelPeriodo.forEach(diaStr => {
                         const jsDay      = new Date(diaStr + 'T00:00:00').getDay();
-                        const bdDay      = jsDay === 0 ? 7 : jsDay; // 1=lun … 7=dom
+                        const bdDay      = jsDay === 0 ? 7 : jsDay;
                         const esDescanso = bdDay === parseInt(emp.dia_descanso);
 
                         if (asistiosDias.has(diaStr)) {
                             diasContados++;
-                        } else if (esDescanso && trabajoAlMenosUnDia) {
+                        } else if (esDescanso) {
+                            // Solo cuenta descanso si cae DENTRO del período real
+                            // (ya garantizado porque diasDelPeriodo empieza desde primerDiaReal)
                             diasContados++;
                         }
                     });
 
-                    // Horas extra filtradas al período de este empleado
+                    // Horas extra dentro del período real del empleado
                     const horasExtraPeriodo = pagDiarios
                         .filter(p =>
                             p.id_empleado === emp.id_empleado &&
-                            p.fecha >= periodoInicio &&
+                            p.fecha >= primerDiaReal &&
                             p.fecha <= fechaFin
                         )
                         .reduce((sum, p) => sum + (p.horas_extra || 0), 0);
@@ -171,6 +191,7 @@ const DetalleNomina = () => {
                         montoHorasExtra: Math.round(montoHorasExtra * 100) / 100,
                         totalCalculado:  Math.round(totalCalculado  * 100) / 100,
                         pagoDiario:      Math.round(pagoDiario      * 100) / 100,
+                        primerDia:       primerDiaReal,
                     };
                 });
 
@@ -199,7 +220,6 @@ const DetalleNomina = () => {
         const empleado = modal.empleado;
         setModal(null);
 
-        // Retirar de la lista visualmente de inmediato
         setEmpleadosPorCargo(prev => {
             const copia = { ...prev };
             Object.keys(copia).forEach(cargo => {
@@ -220,11 +240,14 @@ const DetalleNomina = () => {
             const esFinDeMes = diaCorte === ultimoDia;
             const modo       = empleado.tipo_pago?.trim().toLowerCase();
 
-            const fechaInicio = (modo === 'mensual' && esFinDeMes)
-                ? `${anio}-${mesStr}-01`
-                : diaCorte === 15
+            // Usar el primerDia real como fecha_inicio del pago
+            const fechaInicio = empleado.primerDia || (
+                (modo === 'mensual' && esFinDeMes)
                     ? `${anio}-${mesStr}-01`
-                    : `${anio}-${mesStr}-16`;
+                    : diaCorte === 15
+                        ? `${anio}-${mesStr}-01`
+                        : `${anio}-${mesStr}-16`
+            );
 
             const { error } = await supabase
                 .from('pagostotales')
@@ -239,7 +262,6 @@ const DetalleNomina = () => {
 
         } catch (err) {
             console.error("Error al registrar pago:", err.message);
-            // Revertir si falló
             setEmpleadosPorCargo(prev => {
                 const copia = { ...prev };
                 const cargo = empleado.cargos?.nombre_cargo || 'Sin Cargo';
@@ -318,6 +340,11 @@ const DetalleNomina = () => {
                                                     <div style={empName}>{emp.nombre}</div>
                                                     <div style={empSub}>
                                                         Pago: {emp.tipo_pago} &nbsp;·&nbsp; PIN: {emp.pin_tarjeta}
+                                                        {emp.primerDia && (
+                                                            <span style={{ marginLeft: 8, color: 'rgba(248,177,149,0.6)' }}>
+                                                                · Desde: {emp.primerDia}
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <div style={desgloseRow}>
                                                         <span style={desgloseChip}>
@@ -400,6 +427,14 @@ const DetalleNomina = () => {
                                     {modal.empleado.pin_tarjeta}
                                 </span>
                             </div>
+                            {modal.empleado.primerDia && (
+                                <div style={modalInfoRow}>
+                                    <span style={modalInfoLabel}>Período</span>
+                                    <span style={modalInfoValue}>
+                                        {modal.empleado.primerDia} → {fecha}
+                                    </span>
+                                </div>
+                            )}
                             <div style={modalInfoRow}>
                                 <span style={modalInfoLabel}>Días trabajados</span>
                                 <span style={modalInfoValue}>
@@ -462,8 +497,6 @@ const statusCenter     = { textAlign:'center', padding:'100px 0', color:'rgba(25
 const desgloseRow      = { display:'flex', gap:8, marginTop:6, flexWrap:'wrap' };
 const desgloseChip     = { display:'inline-flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(248,177,149,0.7)', background:'rgba(248,177,149,0.07)', border:'1px solid rgba(248,177,149,0.15)', borderRadius:6, padding:'2px 8px' };
 const sueldoBaseLabel  = { fontSize:11, color:'rgba(255,255,255,0.3)', textAlign:'right', marginTop:2 };
-
-/* ── Modal ── */
 const overlayStyle    = { position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', backdropFilter:'blur(6px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 };
 const modalStyle      = { background:'#220d38', border:'1px solid rgba(255,255,255,0.1)', borderRadius:24, padding:'36px 32px 28px', width:'100%', maxWidth:400, position:'relative', display:'flex', flexDirection:'column', alignItems:'center', gap:10 };
 const modalCloseStyle = { position:'absolute', top:16, right:16, background:'rgba(255,255,255,0.06)', border:'none', color:'rgba(255,255,255,0.5)', borderRadius:8, width:34, height:34, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer' };
