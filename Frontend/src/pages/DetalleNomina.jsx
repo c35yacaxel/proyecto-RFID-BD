@@ -102,12 +102,11 @@ const DetalleNomina = () => {
                             ? fechaInicioMes
                             : fechaInicioQ2;
 
-                    const diasBase  = esMensual ? ultimoDia : 15;
+                    const diasBase   = esMensual ? ultimoDia : 15;
                     const pagoDiario = emp.sueldo_base / diasBase;
 
                     const asistiosDias = asisMap[emp.id_empleado] || new Set();
 
-                    // ── CORRECCIÓN PRINCIPAL ──────────────────────────────
                     // Si el empleado no tiene ninguna asistencia → Q0
                     if (asistiosDias.size === 0) {
                         return {
@@ -154,19 +153,37 @@ const DetalleNomina = () => {
                         diasDelPeriodo.push(new Date(d).toISOString().split('T')[0]);
                     }
 
-                    // Contar días: asistió O es día de descanso (dentro del período real)
+                    // ── CORRECCIÓN: contar días de descanso solo si asistió esa semana ──
                     let diasContados = 0;
                     diasDelPeriodo.forEach(diaStr => {
-                        const jsDay      = new Date(diaStr + 'T00:00:00').getDay();
-                        const bdDay      = jsDay === 0 ? 7 : jsDay;
-                        const esDescanso = bdDay === parseInt(emp.dia_descanso);
-
                         if (asistiosDias.has(diaStr)) {
+                            // Día trabajado: siempre cuenta
                             diasContados++;
-                        } else if (esDescanso) {
-                            // Solo cuenta descanso si cae DENTRO del período real
-                            // (ya garantizado porque diasDelPeriodo empieza desde primerDiaReal)
-                            diasContados++;
+                        } else {
+                            const jsDay  = new Date(diaStr + 'T00:00:00').getDay();
+                            const bdDay  = jsDay === 0 ? 7 : jsDay;
+                            const esDescanso = bdDay === parseInt(emp.dia_descanso);
+
+                            if (esDescanso) {
+                                // Solo contar el descanso si asistió al menos un día esa semana
+                                const diaDate  = new Date(diaStr + 'T00:00:00');
+                                const diaSem   = diaDate.getDay() === 0 ? 7 : diaDate.getDay();
+                                const lunes    = new Date(diaDate);
+                                lunes.setDate(diaDate.getDate() - (diaSem - 1));
+                                const domingo  = new Date(lunes);
+                                domingo.setDate(lunes.getDate() + 6);
+
+                                const lunesStr  = lunes.toISOString().split('T')[0];
+                                const domingoStr = domingo.toISOString().split('T')[0];
+
+                                const asistioEnSemana = [...asistiosDias].some(f =>
+                                    f >= lunesStr && f <= domingoStr
+                                );
+
+                                if (asistioEnSemana) {
+                                    diasContados++;
+                                }
+                            }
                         }
                     });
 
@@ -240,7 +257,6 @@ const DetalleNomina = () => {
             const esFinDeMes = diaCorte === ultimoDia;
             const modo       = empleado.tipo_pago?.trim().toLowerCase();
 
-            // Usar el primerDia real como fecha_inicio del pago
             const fechaInicio = empleado.primerDia || (
                 (modo === 'mensual' && esFinDeMes)
                     ? `${anio}-${mesStr}-01`
