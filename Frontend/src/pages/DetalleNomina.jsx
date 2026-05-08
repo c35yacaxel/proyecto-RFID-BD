@@ -102,17 +102,19 @@ const DetalleNomina = () => {
                             ? fechaInicioMes
                             : fechaInicioQ2;
 
-                    const diasBase  = esMensual ? ultimoDia : 15;
-                    const pagoDiario = emp.sueldo_base / diasBase;
+                    // ── CORRECCIÓN PRINCIPAL ──────────────────────────────
+                    // Siempre dividir sobre los días reales del mes (ultimoDia),
+                    // tanto para mensuales como quincenales.
+                    // Así la suma de ambas quincenas nunca excede el sueldo base.
+                    const pagoDiario = emp.sueldo_base / ultimoDia;
 
                     const asistiosDias = asisMap[emp.id_empleado] || new Set();
 
-                    // ── CORRECCIÓN PRINCIPAL ──────────────────────────────
                     // Si el empleado no tiene ninguna asistencia → Q0
                     if (asistiosDias.size === 0) {
                         return {
                             ...emp,
-                            diasBase,
+                            ultimoDia,
                             diasPeriodo:     0,
                             diasContados:    0,
                             totalHorasExtra: 0,
@@ -132,7 +134,7 @@ const DetalleNomina = () => {
                     if (fechasPeriodo.length === 0) {
                         return {
                             ...emp,
-                            diasBase,
+                            ultimoDia,
                             diasPeriodo:     0,
                             diasContados:    0,
                             totalHorasExtra: 0,
@@ -164,8 +166,6 @@ const DetalleNomina = () => {
                         if (asistiosDias.has(diaStr)) {
                             diasContados++;
                         } else if (esDescanso) {
-                            // Solo cuenta descanso si cae DENTRO del período real
-                            // (ya garantizado porque diasDelPeriodo empieza desde primerDiaReal)
                             diasContados++;
                         }
                     });
@@ -184,7 +184,7 @@ const DetalleNomina = () => {
 
                     return {
                         ...emp,
-                        diasBase,
+                        ultimoDia,
                         diasPeriodo:     diasDelPeriodo.length,
                         diasContados,
                         totalHorasExtra: horasExtraPeriodo,
@@ -240,7 +240,6 @@ const DetalleNomina = () => {
             const esFinDeMes = diaCorte === ultimoDia;
             const modo       = empleado.tipo_pago?.trim().toLowerCase();
 
-            // Usar el primerDia real como fecha_inicio del pago
             const fechaInicio = empleado.primerDia || (
                 (modo === 'mensual' && esFinDeMes)
                     ? `${anio}-${mesStr}-01`
@@ -349,7 +348,7 @@ const DetalleNomina = () => {
                                                     <div style={desgloseRow}>
                                                         <span style={desgloseChip}>
                                                             <Calendar size={11}/>
-                                                            {emp.diasContados}/{emp.diasPeriodo} días
+                                                            {emp.diasContados}/{emp.ultimoDia} días del mes
                                                         </span>
                                                         <span style={desgloseChip}>
                                                             Q{emp.pagoDiario}/día
@@ -436,9 +435,15 @@ const DetalleNomina = () => {
                                 </div>
                             )}
                             <div style={modalInfoRow}>
-                                <span style={modalInfoLabel}>Días trabajados</span>
+                                <span style={modalInfoLabel}>Días contados / días del mes</span>
                                 <span style={modalInfoValue}>
-                                    {modal.empleado.diasContados} de {modal.empleado.diasPeriodo}
+                                    {modal.empleado.diasContados} / {modal.empleado.ultimoDia}
+                                </span>
+                            </div>
+                            <div style={modalInfoRow}>
+                                <span style={modalInfoLabel}>Pago por día</span>
+                                <span style={modalInfoValue}>
+                                    Q{modal.empleado.pagoDiario} (Q{modal.empleado.sueldo_base} ÷ {modal.empleado.ultimoDia} días)
                                 </span>
                             </div>
                             {modal.empleado.totalHorasExtra > 0 && (
@@ -498,7 +503,7 @@ const desgloseRow      = { display:'flex', gap:8, marginTop:6, flexWrap:'wrap' }
 const desgloseChip     = { display:'inline-flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(248,177,149,0.7)', background:'rgba(248,177,149,0.07)', border:'1px solid rgba(248,177,149,0.15)', borderRadius:6, padding:'2px 8px' };
 const sueldoBaseLabel  = { fontSize:11, color:'rgba(255,255,255,0.3)', textAlign:'right', marginTop:2 };
 const overlayStyle    = { position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', backdropFilter:'blur(6px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 };
-const modalStyle      = { background:'#220d38', border:'1px solid rgba(255,255,255,0.1)', borderRadius:24, padding:'36px 32px 28px', width:'100%', maxWidth:400, position:'relative', display:'flex', flexDirection:'column', alignItems:'center', gap:10 };
+const modalStyle      = { background:'#220d38', border:'1px solid rgba(255,255,255,0.1)', borderRadius:24, padding:'36px 32px 28px', width:'100%', maxWidth:420, position:'relative', display:'flex', flexDirection:'column', alignItems:'center', gap:10 };
 const modalCloseStyle = { position:'absolute', top:16, right:16, background:'rgba(255,255,255,0.06)', border:'none', color:'rgba(255,255,255,0.5)', borderRadius:8, width:34, height:34, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer' };
 const modalAvatarStyle= { width:64, height:64, borderRadius:16, background:'linear-gradient(135deg,#f67280,#f8b195)', display:'flex', alignItems:'center', justifyContent:'center', color:'#1a0a2e', fontWeight:800, fontSize:28, marginBottom:4 };
 const modalTitleStyle = { fontSize:22, fontWeight:800, color:'#fff', margin:0, fontFamily:"'Syne',sans-serif" };
