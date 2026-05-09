@@ -3,26 +3,44 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { ArrowLeft, Search, CheckCircle, Loader2, AlertCircle, Briefcase, X, Clock, Calendar } from 'lucide-react';
 
-// ─── Helpers de fecha SIN timezone drift ─────────────────────────────────────
-// new Date("YYYY-MM-DD") interpreta en UTC → en Guatemala (UTC-6) se desplaza al día anterior
-// Usando new Date(y, m-1, d) se crea en hora local → sin drift
+// ─── Helpers de fecha en hora LOCAL (sin UTC drift) ───────────────────────────
 const parseFecha = (str) => {
     const [y, m, d] = str.split('-').map(Number);
     return new Date(y, m - 1, d);
 };
-
 const fechaToStr = (d) => {
     const y   = d.getFullYear();
     const m   = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
     return `${y}-${m}-${day}`;
 };
-
-// "HH:MM" o "HH:MM:SS" → minutos totales
+// "HH:MM" o "HH:MM:SS" → minutos totales desde medianoche
 const timeToMinutos = (t) => {
     if (!t) return null;
     const [h, m] = t.split(':').map(Number);
     return h * 60 + m;
+};
+// Fecha de hoy en hora local como "YYYY-MM-DD"
+const hoyStr = () => fechaToStr(new Date());
+
+// ─── Lógica de horas extra por registro de asistencia ────────────────────────
+// Reglas:
+//   - Entrada antes de hora contractual → se toma como entrada normal (no suma extra)
+//   - Entrada tarde ≤ 30 min → retardo, pero día completo, sin descuento
+//   - Salida hasta 20 min antes de hora contractual → día completo, sin penalización
+//   - Salida 21+ min después de hora contractual → TODAS esas horas cuentan como extra
+const calcularMinutosExtra = (asistencia, empHoraEntrada, empHoraSalida) => {
+    const salidaReal      = timeToMinutos(asistencia.hora_salida);
+    const salidaContrato  = timeToMinutos(empHoraSalida);
+
+    if (salidaReal === null || salidaContrato === null) return 0;
+
+    const minutosDesfase = salidaReal - salidaContrato;
+
+    // Sale 21+ minutos después → hora extra (se cuenta todo el tiempo extra desde min 1)
+    if (minutosDesfase > 20) return minutosDesfase;
+
+    return 0;
 };
 
 const DetalleNomina = () => {
@@ -55,8 +73,9 @@ const DetalleNomina = () => {
             const fechaInicioMes = `${anio}-${mesStr}-01`;
             const fechaInicioQ2  = `${anio}-${mesStr}-16`;
             const fechaFin       = fecha;
+            const hoy            = hoyStr();
 
-            // 1. Empleados ya pagados en esta fecha
+            // 1. Empleados ya pagados en esta fecha de corte
             const { data: pagosData, error: errorPagos } = await supabase
                 .from('pagostotales')
                 .select('id_empleado')
@@ -94,7 +113,7 @@ const DetalleNomina = () => {
                 asisMap[a.id_empleado].push(a);
             });
 
-            // 4. Procesar cada empleado
+            // 4. Calcular pago por empleado
             const filtrados = empData
                 .filter(emp => {
                     const modo = emp.tipo_pago?.trim().toLowerCase();
@@ -126,7 +145,7 @@ const DetalleNomina = () => {
                         return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, null);
                     }
 
-                    // Primera asistencia dentro del período
+                    // Primera asistencia dentro del período actual
                     const fechasPeriodo = asistenciasEmp
                         .map(a => a.fecha)
                         .filter(f => f >= periodoInicio && f <= fechaFin)
@@ -138,11 +157,9 @@ const DetalleNomina = () => {
 
                     const primerDiaReal = fechasPeriodo[0];
 
-                    // ── CORRECCIÓN TIMEZONE ──────────────────────────────────
-                    // parseFecha() usa hora local → sin drift UTC-6
+                    // Generar días del período (hora local, sin UTC drift)
                     const dInicio = parseFecha(primerDiaReal);
                     const dFin    = parseFecha(fechaFin);
-
                     const diasDelPeriodo = [];
                     const cursor = new Date(dInicio);
                     while (cursor <= dFin) {
@@ -150,11 +167,13 @@ const DetalleNomina = () => {
                         cursor.setDate(cursor.getDate() + 1);
                     }
 
-                    // Contar días trabajados + descansos dentro del período
+                    // Contar días: solo pasados, asistió o es descanso
                     let diasContados = 0;
                     diasDelPeriodo.forEach(diaStr => {
-                        const jsDay  = parseFecha(diaStr).getDay(); // 0=Dom
-                        const bdDay  = jsDay === 0 ? 7 : jsDay;     // 1=Lun..7=Dom
+                        if (diaStr > hoy) return; // ignorar días futuros
+
+                        const jsDay  = parseFecha(diaStr).getDay();
+                        const bdDay  = jsDay === 0 ? 7 : jsDay;
                         const esDesc = bdDay === parseInt(emp.dia_descanso);
 
                         if (fechasAsistio.has(diaStr)) {
@@ -162,33 +181,32 @@ const DetalleNomina = () => {
                         } else if (esDesc) {
                             diasContados++;
                         }
+                        // Falta → no cuenta (descuento automático)
                     });
 
-                    // ── HORAS EXTRA desde registrosasistencia ────────────────
-                    // Minutos contractuales del empleado
-                    const minutosContrato = (() => {
-                        const e = timeToMinutos(emp.hora_entrada);
-                        const s = timeToMinutos(emp.hora_salida);
-                        if (e === null || s === null) return 480; // 8h por defecto
-                        return s - e;
-                    })();
-
+                    // ── Horas extra con reglas de tolerancia ─────────────────
+                    // Reglas aplicadas en calcularMinutosExtra():
+                    //   · Entrada antes de hora contractual → normal
+                    //   · Entrada tarde ≤ 30 min → retardo, día completo
+                    //   · Salida ≤ 20 min antes → día completo
+                    //   · Salida 21+ min después → TODOS esos minutos son extra
                     let totalMinutosExtra = 0;
                     asistenciasEmp
                         .filter(a => a.fecha >= primerDiaReal && a.fecha <= fechaFin)
                         .forEach(a => {
-                            const e = timeToMinutos(a.hora_entrada);
-                            const s = timeToMinutos(a.hora_salida);
-                            if (e === null || s === null) return;
-                            const extra = (s - e) - minutosContrato;
-                            if (extra > 0) totalMinutosExtra += extra;
+                            totalMinutosExtra += calcularMinutosExtra(a, emp.hora_entrada, emp.hora_salida);
                         });
 
                     const totalHorasExtra = Math.round((totalMinutosExtra / 60) * 100) / 100;
                     const montoHorasExtra = Math.round(totalHorasExtra * (emp.pago_hora_extra || 0) * 100) / 100;
                     const totalCalculado  = Math.round((diasContados * pagoDiario + montoHorasExtra) * 100) / 100;
 
-                    return mkResult(emp, pagoDiario, ultimoDia, diasDelPeriodo.length, diasContados, totalHorasExtra, montoHorasExtra, primerDiaReal, totalCalculado);
+                    return mkResult(
+                        emp, pagoDiario, ultimoDia,
+                        diasDelPeriodo.length, diasContados,
+                        totalHorasExtra, montoHorasExtra,
+                        primerDiaReal, totalCalculado
+                    );
                 });
 
             // Agrupar por cargo
@@ -210,7 +228,6 @@ const DetalleNomina = () => {
         }
     };
 
-    // Construye el objeto resultado de un empleado
     const mkResult = (emp, pagoDiario, ultimoDia, diasPeriodo, diasContados, totalHorasExtra, montoHorasExtra, primerDia, totalCalculado) => ({
         ...emp,
         ultimoDia,
@@ -270,7 +287,6 @@ const DetalleNomina = () => {
 
         } catch (err) {
             console.error("Error al registrar pago:", err.message);
-            // Rollback
             setEmpleadosPorCargo(prev => {
                 const copia = { ...prev };
                 const cargo = empleado.cargos?.nombre_cargo || 'Sin Cargo';
@@ -339,7 +355,6 @@ const DetalleNomina = () => {
                                     <span style={cargoTitleStyle}>{cargo}</span>
                                     <span style={cargoBadgeStyle}>{empleados.length}</span>
                                 </div>
-
                                 <div style={listContainer}>
                                     {empleados.map(emp => (
                                         <div key={emp.id_empleado} style={cardStyle}>
@@ -375,13 +390,10 @@ const DetalleNomina = () => {
                                             <div style={payAction}>
                                                 <div>
                                                     <div style={amountStyle}>Q{emp.totalCalculado.toLocaleString()}</div>
-                                                    <div style={sueldoBaseLabel}>
-                                                        Base: Q{emp.sueldo_base.toLocaleString()}
-                                                    </div>
+                                                    <div style={sueldoBaseLabel}>Base: Q{emp.sueldo_base.toLocaleString()}</div>
                                                 </div>
                                                 <button onClick={() => abrirModal(emp)} style={payButtonStyle}>
-                                                    <CheckCircle size={16}/>
-                                                    Marcar Pagado
+                                                    <CheckCircle size={16}/> Marcar Pagado
                                                 </button>
                                             </div>
                                         </div>
@@ -420,8 +432,8 @@ const DetalleNomina = () => {
                         <p style={modalSubStyle}>¿Deseas registrar el pago para este empleado?</p>
 
                         <div style={modalInfoBox}>
-                            <ModalRow label="Empleado"    value={modal.empleado.nombre} />
-                            <ModalRow label="PIN"         value={modal.empleado.pin_tarjeta} mono />
+                            <ModalRow label="Empleado" value={modal.empleado.nombre} />
+                            <ModalRow label="PIN" value={modal.empleado.pin_tarjeta} mono />
                             {modal.empleado.primerDia && (
                                 <ModalRow label="Período" value={`${modal.empleado.primerDia} → ${fecha}`} />
                             )}
