@@ -3,6 +3,28 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { ArrowLeft, Search, CheckCircle, Loader2, AlertCircle, Briefcase, X, Clock, Calendar } from 'lucide-react';
 
+// ─── Helpers de fecha SIN timezone drift ─────────────────────────────────────
+// new Date("YYYY-MM-DD") interpreta en UTC → en Guatemala (UTC-6) se desplaza al día anterior
+// Usando new Date(y, m-1, d) se crea en hora local → sin drift
+const parseFecha = (str) => {
+    const [y, m, d] = str.split('-').map(Number);
+    return new Date(y, m - 1, d);
+};
+
+const fechaToStr = (d) => {
+    const y   = d.getFullYear();
+    const m   = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+};
+
+// "HH:MM" o "HH:MM:SS" → minutos totales
+const timeToMinutos = (t) => {
+    if (!t) return null;
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+};
+
 const DetalleNomina = () => {
     const { fecha } = useParams();
     const navigate  = useNavigate();
@@ -56,32 +78,23 @@ const DetalleNomina = () => {
 
             const idsEmpleados = empData.map(e => e.id_empleado);
 
-            // 3. Asistencias del mes completo
+            // 3. Asistencias del mes completo (con horas para calcular extras)
             const { data: asistencias, error: errAsis } = await supabase
                 .from('registrosasistencia')
-                .select('id_empleado, fecha')
+                .select('id_empleado, fecha, hora_entrada, hora_salida')
                 .in('id_empleado', idsEmpleados)
                 .gte('fecha', fechaInicioMes)
                 .lte('fecha', fechaFin);
             if (errAsis) throw errAsis;
 
-            // 4. Horas extra del mes completo
-            const { data: pagDiarios, error: errPD } = await supabase
-                .from('pagosdiarios')
-                .select('id_empleado, fecha, horas_extra')
-                .in('id_empleado', idsEmpleados)
-                .gte('fecha', fechaInicioMes)
-                .lte('fecha', fechaFin);
-            if (errPD) throw errPD;
-
-            // Mapa de asistencias: id_empleado -> Set<fecha>
+            // Mapa: id_empleado -> [{ fecha, hora_entrada, hora_salida }]
             const asisMap = {};
             asistencias.forEach(a => {
-                if (!asisMap[a.id_empleado]) asisMap[a.id_empleado] = new Set();
-                asisMap[a.id_empleado].add(a.fecha);
+                if (!asisMap[a.id_empleado]) asisMap[a.id_empleado] = [];
+                asisMap[a.id_empleado].push(a);
             });
 
-            // Filtrar empleados que corresponde pagar hoy
+            // 4. Procesar cada empleado
             const filtrados = empData
                 .filter(emp => {
                     const modo = emp.tipo_pago?.trim().toLowerCase();
@@ -102,97 +115,80 @@ const DetalleNomina = () => {
                             ? fechaInicioMes
                             : fechaInicioQ2;
 
-                    // ── CORRECCIÓN PRINCIPAL ──────────────────────────────
-                    // Siempre dividir sobre los días reales del mes (ultimoDia),
-                    // tanto para mensuales como quincenales.
-                    // Así la suma de ambas quincenas nunca excede el sueldo base.
+                    // Pago diario siempre sobre días reales del mes
                     const pagoDiario = emp.sueldo_base / ultimoDia;
 
-                    const asistiosDias = asisMap[emp.id_empleado] || new Set();
+                    const asistenciasEmp = asisMap[emp.id_empleado] || [];
+                    const fechasAsistio  = new Set(asistenciasEmp.map(a => a.fecha));
 
-                    // Si el empleado no tiene ninguna asistencia → Q0
-                    if (asistiosDias.size === 0) {
-                        return {
-                            ...emp,
-                            ultimoDia,
-                            diasPeriodo:     0,
-                            diasContados:    0,
-                            totalHorasExtra: 0,
-                            montoHorasExtra: 0,
-                            totalCalculado:  0,
-                            pagoDiario:      Math.round(pagoDiario * 100) / 100,
-                            primerDia:       null,
-                        };
+                    // Sin asistencias → Q0
+                    if (fechasAsistio.size === 0) {
+                        return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, null);
                     }
 
-                    // Encontrar la primera asistencia real dentro del período
-                    const fechasPeriodo = [...asistiosDias]
+                    // Primera asistencia dentro del período
+                    const fechasPeriodo = asistenciasEmp
+                        .map(a => a.fecha)
                         .filter(f => f >= periodoInicio && f <= fechaFin)
                         .sort();
 
-                    // Si no tiene asistencias dentro del período → Q0
                     if (fechasPeriodo.length === 0) {
-                        return {
-                            ...emp,
-                            ultimoDia,
-                            diasPeriodo:     0,
-                            diasContados:    0,
-                            totalHorasExtra: 0,
-                            montoHorasExtra: 0,
-                            totalCalculado:  0,
-                            pagoDiario:      Math.round(pagoDiario * 100) / 100,
-                            primerDia:       null,
-                        };
+                        return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, null);
                     }
 
-                    // El período real empieza desde su primera asistencia
                     const primerDiaReal = fechasPeriodo[0];
 
-                    // Generar lista de fechas DESDE la primera asistencia real
+                    // ── CORRECCIÓN TIMEZONE ──────────────────────────────────
+                    // parseFecha() usa hora local → sin drift UTC-6
+                    const dInicio = parseFecha(primerDiaReal);
+                    const dFin    = parseFecha(fechaFin);
+
                     const diasDelPeriodo = [];
-                    const dInicio = new Date(primerDiaReal + 'T00:00:00');
-                    const dFin    = new Date(fechaFin      + 'T00:00:00');
-                    for (let d = new Date(dInicio); d <= dFin; d.setDate(d.getDate() + 1)) {
-                        diasDelPeriodo.push(new Date(d).toISOString().split('T')[0]);
+                    const cursor = new Date(dInicio);
+                    while (cursor <= dFin) {
+                        diasDelPeriodo.push(fechaToStr(cursor));
+                        cursor.setDate(cursor.getDate() + 1);
                     }
 
-                    // Contar días: asistió O es día de descanso (dentro del período real)
+                    // Contar días trabajados + descansos dentro del período
                     let diasContados = 0;
                     diasDelPeriodo.forEach(diaStr => {
-                        const jsDay      = new Date(diaStr + 'T00:00:00').getDay();
-                        const bdDay      = jsDay === 0 ? 7 : jsDay;
-                        const esDescanso = bdDay === parseInt(emp.dia_descanso);
+                        const jsDay  = parseFecha(diaStr).getDay(); // 0=Dom
+                        const bdDay  = jsDay === 0 ? 7 : jsDay;     // 1=Lun..7=Dom
+                        const esDesc = bdDay === parseInt(emp.dia_descanso);
 
-                        if (asistiosDias.has(diaStr)) {
+                        if (fechasAsistio.has(diaStr)) {
                             diasContados++;
-                        } else if (esDescanso) {
+                        } else if (esDesc) {
                             diasContados++;
                         }
                     });
 
-                    // Horas extra dentro del período real del empleado
-                    const horasExtraPeriodo = pagDiarios
-                        .filter(p =>
-                            p.id_empleado === emp.id_empleado &&
-                            p.fecha >= primerDiaReal &&
-                            p.fecha <= fechaFin
-                        )
-                        .reduce((sum, p) => sum + (p.horas_extra || 0), 0);
+                    // ── HORAS EXTRA desde registrosasistencia ────────────────
+                    // Minutos contractuales del empleado
+                    const minutosContrato = (() => {
+                        const e = timeToMinutos(emp.hora_entrada);
+                        const s = timeToMinutos(emp.hora_salida);
+                        if (e === null || s === null) return 480; // 8h por defecto
+                        return s - e;
+                    })();
 
-                    const montoHorasExtra = horasExtraPeriodo * (emp.pago_hora_extra || 0);
-                    const totalCalculado  = (diasContados * pagoDiario) + montoHorasExtra;
+                    let totalMinutosExtra = 0;
+                    asistenciasEmp
+                        .filter(a => a.fecha >= primerDiaReal && a.fecha <= fechaFin)
+                        .forEach(a => {
+                            const e = timeToMinutos(a.hora_entrada);
+                            const s = timeToMinutos(a.hora_salida);
+                            if (e === null || s === null) return;
+                            const extra = (s - e) - minutosContrato;
+                            if (extra > 0) totalMinutosExtra += extra;
+                        });
 
-                    return {
-                        ...emp,
-                        ultimoDia,
-                        diasPeriodo:     diasDelPeriodo.length,
-                        diasContados,
-                        totalHorasExtra: horasExtraPeriodo,
-                        montoHorasExtra: Math.round(montoHorasExtra * 100) / 100,
-                        totalCalculado:  Math.round(totalCalculado  * 100) / 100,
-                        pagoDiario:      Math.round(pagoDiario      * 100) / 100,
-                        primerDia:       primerDiaReal,
-                    };
+                    const totalHorasExtra = Math.round((totalMinutosExtra / 60) * 100) / 100;
+                    const montoHorasExtra = Math.round(totalHorasExtra * (emp.pago_hora_extra || 0) * 100) / 100;
+                    const totalCalculado  = Math.round((diasContados * pagoDiario + montoHorasExtra) * 100) / 100;
+
+                    return mkResult(emp, pagoDiario, ultimoDia, diasDelPeriodo.length, diasContados, totalHorasExtra, montoHorasExtra, primerDiaReal, totalCalculado);
                 });
 
             // Agrupar por cargo
@@ -203,7 +199,7 @@ const DetalleNomina = () => {
                 agrupados[nombreCargo].push(emp);
             });
             Object.keys(agrupados).forEach(c =>
-                agrupados[c].sort((a,b) => a.nombre.localeCompare(b.nombre))
+                agrupados[c].sort((a, b) => a.nombre.localeCompare(b.nombre))
             );
 
             setEmpleadosPorCargo(agrupados);
@@ -213,6 +209,19 @@ const DetalleNomina = () => {
             setCargando(false);
         }
     };
+
+    // Construye el objeto resultado de un empleado
+    const mkResult = (emp, pagoDiario, ultimoDia, diasPeriodo, diasContados, totalHorasExtra, montoHorasExtra, primerDia, totalCalculado) => ({
+        ...emp,
+        ultimoDia,
+        diasPeriodo,
+        diasContados,
+        totalHorasExtra,
+        montoHorasExtra,
+        totalCalculado: totalCalculado ?? Math.round(diasContados * pagoDiario * 100) / 100,
+        pagoDiario:     Math.round(pagoDiario * 100) / 100,
+        primerDia,
+    });
 
     const abrirModal = (empleado) => setModal({ empleado });
 
@@ -241,7 +250,7 @@ const DetalleNomina = () => {
             const modo       = empleado.tipo_pago?.trim().toLowerCase();
 
             const fechaInicio = empleado.primerDia || (
-                (modo === 'mensual' && esFinDeMes)
+                modo === 'mensual'
                     ? `${anio}-${mesStr}-01`
                     : diaCorte === 15
                         ? `${anio}-${mesStr}-01`
@@ -261,12 +270,13 @@ const DetalleNomina = () => {
 
         } catch (err) {
             console.error("Error al registrar pago:", err.message);
+            // Rollback
             setEmpleadosPorCargo(prev => {
                 const copia = { ...prev };
                 const cargo = empleado.cargos?.nombre_cargo || 'Sin Cargo';
                 if (!copia[cargo]) copia[cargo] = [];
                 copia[cargo] = [...copia[cargo], empleado]
-                    .sort((a,b) => a.nombre.localeCompare(b.nombre));
+                    .sort((a, b) => a.nombre.localeCompare(b.nombre));
                 return copia;
             });
             setPagados(prev => {
@@ -278,10 +288,10 @@ const DetalleNomina = () => {
         }
     };
 
-    const cargosFiltrados = Object.entries(empleadosPorCargo).reduce((acc,[cargo,empleados]) => {
+    const cargosFiltrados = Object.entries(empleadosPorCargo).reduce((acc, [cargo, empleados]) => {
         const f = empleados.filter(e =>
             e.nombre.toLowerCase().includes(busqueda.toLowerCase()) ||
-            (e.pin_tarjeta||'').toLowerCase().includes(busqueda.toLowerCase())
+            (e.pin_tarjeta || '').toLowerCase().includes(busqueda.toLowerCase())
         );
         if (f.length > 0) acc[cargo] = f;
         return acc;
@@ -291,7 +301,7 @@ const DetalleNomina = () => {
 
     return (
         <div style={containerStyle}>
-            <div style={{ maxWidth:1000, width:'100%' }}>
+            <div style={{ maxWidth: 1000, width: '100%' }}>
 
                 <button onClick={() => navigate('/gestion-nomina')} style={backButtonStyle}>
                     <ArrowLeft size={18}/> Volver al Calendario
@@ -302,7 +312,7 @@ const DetalleNomina = () => {
                         <h1 style={titleStyle}>Pagos: {fecha}</h1>
                         <p style={subtitleStyle}>
                             {totalPendientes > 0
-                                ? `${totalPendientes} empleado${totalPendientes!==1?'s':''} pendiente${totalPendientes!==1?'s':''} de pago`
+                                ? `${totalPendientes} empleado${totalPendientes !== 1 ? 's' : ''} pendiente${totalPendientes !== 1 ? 's' : ''} de pago`
                                 : '✅ Todos los empleados han sido pagados'}
                         </p>
                     </div>
@@ -317,11 +327,11 @@ const DetalleNomina = () => {
                 {cargando ? (
                     <div style={statusCenter}>
                         <Loader2 className="animate-spin" size={32} color="#f8b195"/>
-                        <p style={{fontSize:15}}>Calculando pagos reales...</p>
+                        <p style={{ fontSize: 15 }}>Calculando pagos reales...</p>
                     </div>
 
                 ) : Object.keys(cargosFiltrados).length > 0 ? (
-                    <div style={{ display:'flex', flexDirection:'column', gap:30 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 30 }}>
                         {Object.entries(cargosFiltrados).map(([cargo, empleados]) => (
                             <div key={cargo}>
                                 <div style={cargoHeaderStyle}>
@@ -354,7 +364,7 @@ const DetalleNomina = () => {
                                                             Q{emp.pagoDiario}/día
                                                         </span>
                                                         {emp.totalHorasExtra > 0 && (
-                                                            <span style={{...desgloseChip, color:'#ffd166', borderColor:'rgba(255,209,102,0.3)'}}>
+                                                            <span style={{ ...desgloseChip, color: '#ffd166', borderColor: 'rgba(255,209,102,0.3)' }}>
                                                                 <Clock size={11}/>
                                                                 +{emp.totalHorasExtra}h extra (Q{emp.montoHorasExtra.toFixed(2)})
                                                             </span>
@@ -386,86 +396,54 @@ const DetalleNomina = () => {
                         {totalPendientes === 0 && !cargando ? (
                             <>
                                 <CheckCircle size={48} color="#2ed573"/>
-                                <p style={{fontSize:16, color:'#2ed573', fontWeight:700}}>
+                                <p style={{ fontSize: 16, color: '#2ed573', fontWeight: 700 }}>
                                     ¡Todos los pagos del día han sido procesados!
                                 </p>
                             </>
                         ) : (
                             <>
                                 <AlertCircle size={40} color="rgba(255,255,255,0.2)"/>
-                                <p style={{fontSize:15}}>No hay empleados que deban cobrar en esta fecha.</p>
+                                <p style={{ fontSize: 15 }}>No hay empleados que deban cobrar en esta fecha.</p>
                             </>
                         )}
                     </div>
                 )}
             </div>
 
-            {/* ══ MODAL DE CONFIRMACIÓN ══ */}
+            {/* ══ MODAL ══ */}
             {modal && (
                 <div style={overlayStyle} onClick={() => setModal(null)}>
                     <div style={modalStyle} onClick={e => e.stopPropagation()}>
-
-                        <button onClick={() => setModal(null)} style={modalCloseStyle}>
-                            <X size={18}/>
-                        </button>
-
-                        <div style={modalAvatarStyle}>
-                            {modal.empleado.nombre.charAt(0)}
-                        </div>
+                        <button onClick={() => setModal(null)} style={modalCloseStyle}><X size={18}/></button>
+                        <div style={modalAvatarStyle}>{modal.empleado.nombre.charAt(0)}</div>
                         <h2 style={modalTitleStyle}>Confirmar Pago</h2>
                         <p style={modalSubStyle}>¿Deseas registrar el pago para este empleado?</p>
 
                         <div style={modalInfoBox}>
-                            <div style={modalInfoRow}>
-                                <span style={modalInfoLabel}>Empleado</span>
-                                <span style={modalInfoValue}>{modal.empleado.nombre}</span>
-                            </div>
-                            <div style={modalInfoRow}>
-                                <span style={modalInfoLabel}>PIN</span>
-                                <span style={{...modalInfoValue, fontFamily:'monospace', letterSpacing:2}}>
-                                    {modal.empleado.pin_tarjeta}
-                                </span>
-                            </div>
+                            <ModalRow label="Empleado"    value={modal.empleado.nombre} />
+                            <ModalRow label="PIN"         value={modal.empleado.pin_tarjeta} mono />
                             {modal.empleado.primerDia && (
-                                <div style={modalInfoRow}>
-                                    <span style={modalInfoLabel}>Período</span>
-                                    <span style={modalInfoValue}>
-                                        {modal.empleado.primerDia} → {fecha}
-                                    </span>
-                                </div>
+                                <ModalRow label="Período" value={`${modal.empleado.primerDia} → ${fecha}`} />
                             )}
-                            <div style={modalInfoRow}>
-                                <span style={modalInfoLabel}>Días contados / días del mes</span>
-                                <span style={modalInfoValue}>
-                                    {modal.empleado.diasContados} / {modal.empleado.ultimoDia}
-                                </span>
-                            </div>
-                            <div style={modalInfoRow}>
-                                <span style={modalInfoLabel}>Pago por día</span>
-                                <span style={modalInfoValue}>
-                                    Q{modal.empleado.pagoDiario} (Q{modal.empleado.sueldo_base} ÷ {modal.empleado.ultimoDia} días)
-                                </span>
-                            </div>
+                            <ModalRow label="Días contados / días del mes"
+                                value={`${modal.empleado.diasContados} / ${modal.empleado.ultimoDia}`} />
+                            <ModalRow label="Pago por día"
+                                value={`Q${modal.empleado.pagoDiario} (Q${modal.empleado.sueldo_base} ÷ ${modal.empleado.ultimoDia} días)`} />
                             {modal.empleado.totalHorasExtra > 0 && (
-                                <div style={modalInfoRow}>
-                                    <span style={modalInfoLabel}>Horas extra</span>
-                                    <span style={{...modalInfoValue, color:'#ffd166'}}>
-                                        {modal.empleado.totalHorasExtra}h → Q{modal.empleado.montoHorasExtra.toFixed(2)}
-                                    </span>
-                                </div>
+                                <ModalRow label="Horas extra"
+                                    value={`${modal.empleado.totalHorasExtra}h → Q${modal.empleado.montoHorasExtra.toFixed(2)}`}
+                                    color="#ffd166" />
                             )}
-                            <div style={{...modalInfoRow, borderBottom:'none'}}>
+                            <div style={{ ...modalInfoRow, borderBottom: 'none' }}>
                                 <span style={modalInfoLabel}>Total a Pagar</span>
-                                <span style={{...modalInfoValue, color:'#f8b195', fontSize:20, fontWeight:800}}>
+                                <span style={{ ...modalInfoValue, color: '#f8b195', fontSize: 20, fontWeight: 800 }}>
                                     Q{modal.empleado.totalCalculado.toLocaleString()}
                                 </span>
                             </div>
                         </div>
 
-                        <div style={{display:'flex', gap:12, marginTop:8, width:'100%'}}>
-                            <button onClick={() => setModal(null)} style={modalCancelBtn}>
-                                Cancelar
-                            </button>
+                        <div style={{ display: 'flex', gap: 12, marginTop: 8, width: '100%' }}>
+                            <button onClick={() => setModal(null)} style={modalCancelBtn}>Cancelar</button>
                             <button onClick={confirmarPago} style={modalConfirmBtn}>
                                 <CheckCircle size={17}/> Confirmar Pago
                             </button>
@@ -477,42 +455,51 @@ const DetalleNomina = () => {
     );
 };
 
+const ModalRow = ({ label, value, mono, color }) => (
+    <div style={modalInfoRow}>
+        <span style={modalInfoLabel}>{label}</span>
+        <span style={{ ...modalInfoValue, fontFamily: mono ? 'monospace' : undefined, letterSpacing: mono ? 2 : undefined, color: color || '#fff' }}>
+            {value}
+        </span>
+    </div>
+);
+
 /* ─── Estilos ─── */
-const containerStyle   = { minHeight:'100vh', background:'#1a0a2e', padding:'3rem 2rem', color:'#fff', fontFamily:"'DM Sans',sans-serif", display:'flex', justifyContent:'center' };
-const backButtonStyle  = { background:'transparent', border:'none', color:'#f67280', display:'flex', alignItems:'center', gap:8, cursor:'pointer', marginBottom:20, fontWeight:600, fontSize:15 };
-const headerStyle      = { display:'flex', justifyContent:'space-between', alignItems:'flex-end', marginBottom:30 };
-const titleStyle       = { fontSize:32, color:'#f8b195', margin:0, fontWeight:800, fontFamily:"'Syne',sans-serif" };
-const subtitleStyle    = { color:'rgba(255,255,255,0.4)', fontSize:14, marginTop:5 };
-const searchWrapper    = { position:'relative', width:300 };
-const searchIcon       = { position:'absolute', left:15, top:'50%', transform:'translateY(-50%)', color:'rgba(255,255,255,0.3)' };
-const searchInput      = { width:'100%', background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', borderRadius:12, padding:'12px 15px 12px 45px', color:'#fff', outline:'none', boxSizing:'border-box', fontSize:14 };
-const cargoHeaderStyle = { display:'flex', alignItems:'center', gap:10, marginBottom:12, paddingBottom:10, borderBottom:'1px solid rgba(248,177,149,0.2)' };
-const cargoTitleStyle  = { fontSize:16, fontWeight:700, color:'#f8b195', textTransform:'uppercase', letterSpacing:1 };
-const cargoBadgeStyle  = { fontSize:12, background:'rgba(248,177,149,0.15)', color:'#f8b195', padding:'3px 12px', borderRadius:20, fontWeight:700 };
-const listContainer    = { display:'flex', flexDirection:'column', gap:12 };
-const cardStyle        = { background:'rgba(255,255,255,0.03)', border:'1px solid rgba(255,255,255,0.08)', borderRadius:20, padding:20, display:'flex', justifyContent:'space-between', alignItems:'center', transition:'all 0.2s' };
-const empInfo          = { display:'flex', gap:15, alignItems:'center' };
-const avatarStyle      = { width:48, height:48, borderRadius:12, background:'linear-gradient(135deg,#f67280,#f8b195)', display:'flex', alignItems:'center', justifyContent:'center', color:'#1a0a2e', fontWeight:800, fontSize:20, flexShrink:0 };
-const empName          = { fontSize:18, fontWeight:700 };
-const empSub           = { fontSize:13, color:'rgba(255,255,255,0.4)', marginTop:2 };
-const payAction        = { display:'flex', alignItems:'center', gap:20 };
-const amountStyle      = { fontSize:20, fontWeight:800, color:'#f8b195' };
-const payButtonStyle   = { background:'rgba(46,213,115,0.12)', border:'1px solid #2ed573', color:'#2ed573', padding:'9px 18px', borderRadius:10, display:'flex', alignItems:'center', gap:8, fontWeight:700, fontSize:14, cursor:'pointer', transition:'all 0.2s' };
-const statusCenter     = { textAlign:'center', padding:'100px 0', color:'rgba(255,255,255,0.3)', display:'flex', flexDirection:'column', alignItems:'center', gap:15 };
-const desgloseRow      = { display:'flex', gap:8, marginTop:6, flexWrap:'wrap' };
-const desgloseChip     = { display:'inline-flex', alignItems:'center', gap:4, fontSize:11, color:'rgba(248,177,149,0.7)', background:'rgba(248,177,149,0.07)', border:'1px solid rgba(248,177,149,0.15)', borderRadius:6, padding:'2px 8px' };
-const sueldoBaseLabel  = { fontSize:11, color:'rgba(255,255,255,0.3)', textAlign:'right', marginTop:2 };
-const overlayStyle    = { position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', backdropFilter:'blur(6px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 };
-const modalStyle      = { background:'#220d38', border:'1px solid rgba(255,255,255,0.1)', borderRadius:24, padding:'36px 32px 28px', width:'100%', maxWidth:420, position:'relative', display:'flex', flexDirection:'column', alignItems:'center', gap:10 };
-const modalCloseStyle = { position:'absolute', top:16, right:16, background:'rgba(255,255,255,0.06)', border:'none', color:'rgba(255,255,255,0.5)', borderRadius:8, width:34, height:34, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer' };
-const modalAvatarStyle= { width:64, height:64, borderRadius:16, background:'linear-gradient(135deg,#f67280,#f8b195)', display:'flex', alignItems:'center', justifyContent:'center', color:'#1a0a2e', fontWeight:800, fontSize:28, marginBottom:4 };
-const modalTitleStyle = { fontSize:22, fontWeight:800, color:'#fff', margin:0, fontFamily:"'Syne',sans-serif" };
-const modalSubStyle   = { fontSize:14, color:'rgba(255,255,255,0.4)', margin:0, textAlign:'center' };
-const modalInfoBox    = { width:'100%', background:'rgba(255,255,255,0.04)', border:'1px solid rgba(255,255,255,0.08)', borderRadius:14, overflow:'hidden', marginTop:6 };
-const modalInfoRow    = { display:'flex', justifyContent:'space-between', alignItems:'center', padding:'13px 18px', borderBottom:'1px solid rgba(255,255,255,0.06)' };
-const modalInfoLabel  = { fontSize:12, color:'rgba(255,255,255,0.4)', fontWeight:600, textTransform:'uppercase', letterSpacing:.6 };
-const modalInfoValue  = { fontSize:15, fontWeight:700, color:'#fff' };
-const modalCancelBtn  = { flex:1, background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', color:'rgba(255,255,255,0.6)', borderRadius:12, padding:'12px', fontSize:14, fontWeight:700, cursor:'pointer' };
-const modalConfirmBtn = { flex:2, background:'rgba(46,213,115,0.15)', border:'1px solid #2ed573', color:'#2ed573', borderRadius:12, padding:'12px 20px', fontSize:14, fontWeight:700, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:8 };
+const containerStyle   = { minHeight: '100vh', background: '#1a0a2e', padding: '3rem 2rem', color: '#fff', fontFamily: "'DM Sans',sans-serif", display: 'flex', justifyContent: 'center' };
+const backButtonStyle  = { background: 'transparent', border: 'none', color: '#f67280', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 20, fontWeight: 600, fontSize: 15 };
+const headerStyle      = { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 30 };
+const titleStyle       = { fontSize: 32, color: '#f8b195', margin: 0, fontWeight: 800, fontFamily: "'Syne',sans-serif" };
+const subtitleStyle    = { color: 'rgba(255,255,255,0.4)', fontSize: 14, marginTop: 5 };
+const searchWrapper    = { position: 'relative', width: 300 };
+const searchIcon       = { position: 'absolute', left: 15, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.3)' };
+const searchInput      = { width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 15px 12px 45px', color: '#fff', outline: 'none', boxSizing: 'border-box', fontSize: 14 };
+const cargoHeaderStyle = { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid rgba(248,177,149,0.2)' };
+const cargoTitleStyle  = { fontSize: 16, fontWeight: 700, color: '#f8b195', textTransform: 'uppercase', letterSpacing: 1 };
+const cargoBadgeStyle  = { fontSize: 12, background: 'rgba(248,177,149,0.15)', color: '#f8b195', padding: '3px 12px', borderRadius: 20, fontWeight: 700 };
+const listContainer    = { display: 'flex', flexDirection: 'column', gap: 12 };
+const cardStyle        = { background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 20, padding: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', transition: 'all 0.2s' };
+const empInfo          = { display: 'flex', gap: 15, alignItems: 'center' };
+const avatarStyle      = { width: 48, height: 48, borderRadius: 12, background: 'linear-gradient(135deg,#f67280,#f8b195)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#1a0a2e', fontWeight: 800, fontSize: 20, flexShrink: 0 };
+const empName          = { fontSize: 18, fontWeight: 700 };
+const empSub           = { fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 2 };
+const payAction        = { display: 'flex', alignItems: 'center', gap: 20 };
+const amountStyle      = { fontSize: 20, fontWeight: 800, color: '#f8b195' };
+const payButtonStyle   = { background: 'rgba(46,213,115,0.12)', border: '1px solid #2ed573', color: '#2ed573', padding: '9px 18px', borderRadius: 10, display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: 14, cursor: 'pointer', transition: 'all 0.2s' };
+const statusCenter     = { textAlign: 'center', padding: '100px 0', color: 'rgba(255,255,255,0.3)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 15 };
+const desgloseRow      = { display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' };
+const desgloseChip     = { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'rgba(248,177,149,0.7)', background: 'rgba(248,177,149,0.07)', border: '1px solid rgba(248,177,149,0.15)', borderRadius: 6, padding: '2px 8px' };
+const sueldoBaseLabel  = { fontSize: 11, color: 'rgba(255,255,255,0.3)', textAlign: 'right', marginTop: 2 };
+const overlayStyle     = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 };
+const modalStyle       = { background: '#220d38', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 24, padding: '36px 32px 28px', width: '100%', maxWidth: 420, position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 };
+const modalCloseStyle  = { position: 'absolute', top: 16, right: 16, background: 'rgba(255,255,255,0.06)', border: 'none', color: 'rgba(255,255,255,0.5)', borderRadius: 8, width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' };
+const modalAvatarStyle = { width: 64, height: 64, borderRadius: 16, background: 'linear-gradient(135deg,#f67280,#f8b195)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#1a0a2e', fontWeight: 800, fontSize: 28, marginBottom: 4 };
+const modalTitleStyle  = { fontSize: 22, fontWeight: 800, color: '#fff', margin: 0, fontFamily: "'Syne',sans-serif" };
+const modalSubStyle    = { fontSize: 14, color: 'rgba(255,255,255,0.4)', margin: 0, textAlign: 'center' };
+const modalInfoBox     = { width: '100%', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 14, overflow: 'hidden', marginTop: 6 };
+const modalInfoRow     = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '13px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)' };
+const modalInfoLabel   = { fontSize: 12, color: 'rgba(255,255,255,0.4)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: .6 };
+const modalInfoValue   = { fontSize: 15, fontWeight: 700, color: '#fff' };
+const modalCancelBtn   = { flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.6)', borderRadius: 12, padding: '12px', fontSize: 14, fontWeight: 700, cursor: 'pointer' };
+const modalConfirmBtn  = { flex: 2, background: 'rgba(46,213,115,0.15)', border: '1px solid #2ed573', color: '#2ed573', borderRadius: 12, padding: '12px 20px', fontSize: 14, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 };
 
 export default DetalleNomina;
