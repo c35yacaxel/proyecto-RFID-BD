@@ -167,11 +167,16 @@ const DetalleNomina = () => {
                     // sin importar si la fecha parece "futura" según el reloj local.
                     // Esto evita que registros ingresados manualmente o con diferencia
                     // de zona horaria se ignoren incorrectamente.
+                    // PAGO DOBLE: si hay asistencia en día de descanso → suma 2 días.
                     let diasContados = 0;
                     diasDelPeriodo.forEach(diaStr => {
                         // Si hay asistencia real registrada → cuenta siempre
                         if (fechasAsistio.has(diaStr)) {
-                            diasContados++;
+                            const jsDayA = parseFecha(diaStr).getDay();
+                            const bdDayA = jsDayA === 0 ? 7 : jsDayA;
+                            const esDescA = bdDayA === parseInt(emp.dia_descanso);
+                            // Trabajó en día de descanso → pago doble
+                            diasContados += esDescA ? 2 : 1;
                             return;
                         }
 
