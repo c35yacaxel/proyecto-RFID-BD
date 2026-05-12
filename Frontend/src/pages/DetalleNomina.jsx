@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
-import { ArrowLeft, Search, CheckCircle, Loader2, AlertCircle, Briefcase, X, Clock, Calendar } from 'lucide-react';
+import { ArrowLeft, Search, CheckCircle, Loader2, AlertCircle, Briefcase, X, Clock, Calendar, Moon } from 'lucide-react';
 
 // ─── Helpers de fecha en hora LOCAL (sin UTC drift) ───────────────────────────
 const parseFecha = (str) => {
@@ -137,7 +137,7 @@ const DetalleNomina = () => {
 
                     // Sin asistencias → Q0
                     if (fechasAsistio.size === 0) {
-                        return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, null);
+                        return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, 0, null);
                     }
 
                     // Primera asistencia dentro del período actual
@@ -147,7 +147,7 @@ const DetalleNomina = () => {
                         .sort();
 
                     if (fechasPeriodo.length === 0) {
-                        return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, null);
+                        return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, 0, null);
                     }
 
                     const primerDiaReal = fechasPeriodo[0];
@@ -162,36 +162,37 @@ const DetalleNomina = () => {
                         cursor.setDate(cursor.getDate() + 1);
                     }
 
-                    // ── FIX: contar días correctamente ───────────────────────
-                    // Si el día tiene asistencia registrada en Supabase, SIEMPRE cuenta,
-                    // sin importar si la fecha parece "futura" según el reloj local.
-                    // Esto evita que registros ingresados manualmente o con diferencia
-                    // de zona horaria se ignoren incorrectamente.
-                    // PAGO DOBLE: si hay asistencia en día de descanso → suma 2 días.
-                    let diasContados = 0;
+                    // ── Contar días reales y días dobles por separado ────────
+                    // diasTrabajados: días reales del calendario en que asistió
+                    // diasDobles: cuántos de esos días eran día de descanso (pago extra)
+                    let diasTrabajados = 0;  // días reales trabajados
+                    let diasDobles     = 0;  // de esos, cuántos fueron en día de descanso
+
                     diasDelPeriodo.forEach(diaStr => {
-                        // Si hay asistencia real registrada → cuenta siempre
                         if (fechasAsistio.has(diaStr)) {
+                            diasTrabajados++;
                             const jsDayA = parseFecha(diaStr).getDay();
                             const bdDayA = jsDayA === 0 ? 7 : jsDayA;
                             const esDescA = bdDayA === parseInt(emp.dia_descanso);
-                            // Trabajó en día de descanso → pago doble
-                            diasContados += esDescA ? 2 : 1;
+                            if (esDescA) diasDobles++;
                             return;
                         }
 
-                        // Sin asistencia: ignorar días futuros (sin datos reales)
+                        // Sin asistencia: ignorar días futuros
                         if (diaStr > hoy) return;
 
                         const jsDay  = parseFecha(diaStr).getDay();
                         const bdDay  = jsDay === 0 ? 7 : jsDay;
                         const esDesc = bdDay === parseInt(emp.dia_descanso);
 
-                        if (esDesc) {
-                            diasContados++;
-                        }
+                        // Día de descanso sin asistencia → igual se paga
+                        if (esDesc) diasTrabajados++;
                         // Falta → no cuenta (descuento automático)
                     });
+
+                    // Monto: días normales + bono por cada día doble (= 1 día extra de pago)
+                    const montoBase    = Math.round(diasTrabajados * pagoDiario * 100) / 100;
+                    const montoDobles  = Math.round(diasDobles * pagoDiario * 100) / 100;
 
                     // ── Horas extra con reglas de tolerancia ─────────────────
                     let totalMinutosExtra = 0;
@@ -203,13 +204,13 @@ const DetalleNomina = () => {
 
                     const totalHorasExtra = Math.round((totalMinutosExtra / 60) * 100) / 100;
                     const montoHorasExtra = Math.round(totalHorasExtra * (emp.pago_hora_extra || 0) * 100) / 100;
-                    const totalCalculado  = Math.round((diasContados * pagoDiario + montoHorasExtra) * 100) / 100;
+                    const totalCalculado  = Math.round((montoBase + montoDobles + montoHorasExtra) * 100) / 100;
 
                     return mkResult(
                         emp, pagoDiario, ultimoDia,
-                        diasDelPeriodo.length, diasContados,
+                        diasDelPeriodo.length, diasTrabajados, diasDobles,
                         totalHorasExtra, montoHorasExtra,
-                        primerDiaReal, totalCalculado
+                        primerDiaReal, totalCalculado, montoDobles
                     );
                 });
 
@@ -232,15 +233,17 @@ const DetalleNomina = () => {
         }
     };
 
-    const mkResult = (emp, pagoDiario, ultimoDia, diasPeriodo, diasContados, totalHorasExtra, montoHorasExtra, primerDia, totalCalculado) => ({
+    const mkResult = (emp, pagoDiario, ultimoDia, diasPeriodo, diasTrabajados, diasDobles, totalHorasExtra, montoHorasExtra, primerDia, totalCalculado, montoDobles) => ({
         ...emp,
         ultimoDia,
         diasPeriodo,
-        diasContados,
+        diasTrabajados,  // días reales del calendario
+        diasDobles,      // cuántos de esos fueron en día de descanso
+        montoDobles:     montoDobles ?? 0,
         totalHorasExtra,
         montoHorasExtra,
-        totalCalculado: totalCalculado ?? Math.round(diasContados * pagoDiario * 100) / 100,
-        pagoDiario:     Math.round(pagoDiario * 100) / 100,
+        totalCalculado:  totalCalculado ?? Math.round(diasTrabajados * pagoDiario * 100) / 100,
+        pagoDiario:      Math.round(pagoDiario * 100) / 100,
         primerDia,
     });
 
@@ -377,11 +380,17 @@ const DetalleNomina = () => {
                                                     <div style={desgloseRow}>
                                                         <span style={desgloseChip}>
                                                             <Calendar size={11}/>
-                                                            {emp.diasContados}/{emp.ultimoDia} días del mes
+                                                            {emp.diasTrabajados} día{emp.diasTrabajados !== 1 ? 's' : ''} trabajado{emp.diasTrabajados !== 1 ? 's' : ''}
                                                         </span>
                                                         <span style={desgloseChip}>
                                                             Q{emp.pagoDiario}/día
                                                         </span>
+                                                        {emp.diasDobles > 0 && (
+                                                            <span style={{ ...desgloseChip, color: '#ff9f43', borderColor: 'rgba(255,159,67,0.3)', background: 'rgba(255,159,67,0.08)' }}>
+                                                                <Moon size={11}/>
+                                                                {emp.diasDobles} día{emp.diasDobles !== 1 ? 's' : ''} de descanso trabajado{emp.diasDobles !== 1 ? 's' : ''} (pago doble)
+                                                            </span>
+                                                        )}
                                                         {emp.totalHorasExtra > 0 && (
                                                             <span style={{ ...desgloseChip, color: '#ffd166', borderColor: 'rgba(255,209,102,0.3)' }}>
                                                                 <Clock size={11}/>
@@ -441,10 +450,17 @@ const DetalleNomina = () => {
                             {modal.empleado.primerDia && (
                                 <ModalRow label="Período" value={`${modal.empleado.primerDia} → ${fecha}`} />
                             )}
-                            <ModalRow label="Días contados / días del mes"
-                                value={`${modal.empleado.diasContados} / ${modal.empleado.ultimoDia}`} />
-                            <ModalRow label="Pago por día"
-                                value={`Q${modal.empleado.pagoDiario} (Q${modal.empleado.sueldo_base} ÷ ${modal.empleado.ultimoDia} días)`} />
+                            <ModalRow
+                                label="Días trabajados"
+                                value={`${modal.empleado.diasTrabajados} día${modal.empleado.diasTrabajados !== 1 ? 's' : ''} × Q${modal.empleado.pagoDiario} = Q${(modal.empleado.diasTrabajados * modal.empleado.pagoDiario).toFixed(2)}`}
+                            />
+                            {modal.empleado.diasDobles > 0 && (
+                                <ModalRow
+                                    label={`Bono día${modal.empleado.diasDobles !== 1 ? 's' : ''} de descanso trabajado${modal.empleado.diasDobles !== 1 ? 's' : ''}`}
+                                    value={`${modal.empleado.diasDobles} × Q${modal.empleado.pagoDiario} = Q${modal.empleado.montoDobles.toFixed(2)}`}
+                                    color="#ff9f43"
+                                />
+                            )}
                             {modal.empleado.totalHorasExtra > 0 && (
                                 <ModalRow label="Horas extra"
                                     value={`${modal.empleado.totalHorasExtra}h → Q${modal.empleado.montoHorasExtra.toFixed(2)}`}
