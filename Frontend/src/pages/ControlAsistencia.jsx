@@ -139,13 +139,24 @@ const CalendarioEmpleado = ({ mes, asistencias, diaDescanso }) => {
         const esDescanso = diaDescanso !== null && diaDescanso !== undefined && diaSemana === Number(diaDescanso);
         const asistio = fechasAsistio.has(fecha);
         const esFuturo = fecha > hoy;
+
         let bg, color, title;
-        if (esFuturo) { bg = 'rgba(255,255,255,0.03)'; color = 'rgba(255,255,255,0.15)'; title = 'Futuro'; }
-        else if (esDescanso) { bg = 'rgba(96,165,250,0.15)'; color = '#60a5fa'; title = 'Descanso'; }
-        else if (asistio) { bg = 'rgba(74,222,128,0.15)'; color = '#4ade80'; title = 'Asistió'; }
-        else { bg = 'rgba(248,113,113,0.15)'; color = '#f87171'; title = 'Falta'; }
+
+        // ── FIX: la asistencia real tiene prioridad absoluta ──
+        // Si hay registro en Supabase → verde, sin importar si la fecha
+        // parece "futura" por diferencia de zona horaria.
+        if (asistio) {
+            bg = 'rgba(74,222,128,0.15)'; color = '#4ade80'; title = 'Asistió';
+        } else if (esDescanso && !esFuturo) {
+            bg = 'rgba(96,165,250,0.15)'; color = '#60a5fa'; title = 'Descanso';
+        } else if (!esFuturo && !esDescanso) {
+            bg = 'rgba(248,113,113,0.15)'; color = '#f87171'; title = 'Falta';
+        } else {
+            bg = 'rgba(255,255,255,0.03)'; color = 'rgba(255,255,255,0.15)'; title = 'Futuro';
+        }
+
         celdas.push(
-            <div key={d} title={`${fecha} — ${title}`} style={{ background: bg, color, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, height: 28, border: `1px solid ${esFuturo ? 'transparent' : color + '33'}`, cursor: 'default' }}>
+            <div key={d} title={`${fecha} — ${title}`} style={{ background: bg, color, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, height: 28, border: `1px solid ${esFuturo && !asistio ? 'transparent' : color + '33'}`, cursor: 'default' }}>
                 {d}
             </div>
         );
@@ -334,15 +345,10 @@ const ControlAsistencia = () => {
         return new Intl.DateTimeFormat('es-ES', { month: 'long', year: 'numeric' }).format(new Date(y, m - 1, 1));
     };
 
-    // ─── LÓGICA DE IMPRESIÓN ──────────────────────────────────────────────────
-    // DÍA: imprime reporte general (todos los cargos y empleados).
-    // MES: imprime solo el empleado que está buscado/filtrado (si hay búsqueda activa)
-    //      o muestra aviso de que se debe buscar un empleado primero.
     const exportarPDF = () => {
         window.print();
     };
 
-    // Empleado seleccionado para imprimir en modo mes (el que aparece en búsqueda, el primero encontrado)
     const empleadoParaImprimirMes = (() => {
         if (tipoFiltro !== 'mes') return null;
         for (const cargo of datosProcesados) {
@@ -380,10 +386,18 @@ const ControlAsistencia = () => {
             const asistio = fechasAsistio.has(fecha);
             const esFuturo = fecha > hoyStr;
             let bg = '#eee', color2 = '#999', label = '';
-            if (esFuturo) { bg = '#f5f5f5'; color2 = '#ccc'; }
-            else if (esDescanso) { bg = '#dbeafe'; color2 = '#3b82f6'; label = 'D'; }
-            else if (asistio) { bg = '#dcfce7'; color2 = '#16a34a'; label = '✓'; }
-            else { bg = '#fee2e2'; color2 = '#dc2626'; label = '✗'; }
+
+            // ── FIX mismo en versión impresa ──
+            if (asistio) {
+                bg = '#dcfce7'; color2 = '#16a34a'; label = '✓';
+            } else if (esDescanso && !esFuturo) {
+                bg = '#dbeafe'; color2 = '#3b82f6'; label = 'D';
+            } else if (!esFuturo) {
+                bg = '#fee2e2'; color2 = '#dc2626'; label = '✗';
+            } else {
+                bg = '#f5f5f5'; color2 = '#ccc';
+            }
+
             celdas.push(
                 <td key={d} style={{ padding: 3, textAlign: 'center' }}>
                     <div style={{ background: bg, color: color2, borderRadius: 6, width: 32, height: 32, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, margin: 'auto' }}>
@@ -393,7 +407,6 @@ const ControlAsistencia = () => {
                 </td>
             );
         }
-        // Agrupar celdas en filas de 7
         const allCells = celdas;
         const rows = [];
         for (let i = 0; i < allCells.length; i += 7) rows.push(allCells.slice(i, i + 7));
@@ -406,7 +419,6 @@ const ControlAsistencia = () => {
                     <div style={{ fontSize: 13, color: '#555', marginTop: 4 }}>{nombreMesActual} {mesY} · {diasLaborables} días laborables · Generado el {new Date().toLocaleDateString('es-GT')}</div>
                 </div>
 
-                {/* Info empleado */}
                 <div style={{ display: 'flex', gap: 24, marginBottom: 20, background: '#f8f4ff', borderRadius: 12, padding: 16 }}>
                     <div style={{ width: 56, height: 56, borderRadius: '50%', background: '#f67280', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, fontWeight: 800, color: '#fff', flexShrink: 0 }}>
                         {emp.nombre.charAt(0)}
@@ -417,7 +429,6 @@ const ControlAsistencia = () => {
                     </div>
                 </div>
 
-                {/* KPIs */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
                     {[
                         { label: 'Días Asistidos', value: emp.diasAsistidos, color: '#16a34a', bg: '#dcfce7' },
@@ -432,7 +443,6 @@ const ControlAsistencia = () => {
                     ))}
                 </div>
 
-                {/* Calendario */}
                 <div style={{ marginBottom: 20 }}>
                     <div style={{ fontSize: 12, fontWeight: 800, color: '#f67280', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Calendario de Asistencia</div>
                     <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 3 }}>
@@ -452,7 +462,6 @@ const ControlAsistencia = () => {
                     </div>
                 </div>
 
-                {/* Historial de entradas */}
                 {emp.asistencias.length > 0 && (
                     <div>
                         <div style={{ fontSize: 12, fontWeight: 800, color: '#f67280', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Historial de Entradas</div>
@@ -507,7 +516,6 @@ const ControlAsistencia = () => {
                     <div style={{ fontSize: 13, color: '#555', marginTop: 4, textTransform: 'capitalize' }}>{fechaLegible} · Generado el {new Date().toLocaleDateString('es-GT')}</div>
                 </div>
 
-                {/* KPIs globales */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 24 }}>
                     {[
                         { label: 'Total Empleados', value: totalEmpleados, color: '#7c3aed', bg: '#f3e8ff' },
@@ -521,7 +529,6 @@ const ControlAsistencia = () => {
                     ))}
                 </div>
 
-                {/* Tabla por cargo */}
                 {datosProcesados.map(cargo => {
                     const presentes = cargo.staff.filter(e => e.asistioHoy).length;
                     const ausentes = cargo.totalStaff - presentes;
@@ -587,45 +594,24 @@ const ControlAsistencia = () => {
                 @keyframes spin { to { transform: rotate(360deg); } }
                 @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 
-                /* ── ESTILOS DE IMPRESIÓN ── */
                 @media print {
                     .no-print { display: none !important; }
                     body { background: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; }
-
-                    /* Ocultar toda la UI normal */
                     .ca-ui { display: none !important; }
-
-                    /* Mostrar solo el bloque correcto */
-                    .print-only-dia,
-                    .print-only-mes {
-                        display: none;
-                    }
-
+                    .print-only-dia, .print-only-mes { display: none; }
                     ${tipoFiltro === 'dia' ? '.print-only-dia { display: block !important; }' : ''}
                     ${tipoFiltro === 'mes' ? '.print-only-mes { display: block !important; }' : ''}
-
-                    /* Contenedor de impresión */
-                    .print-wrapper {
-                        display: block !important;
-                        background: #fff;
-                        color: #111;
-                        font-family: 'DM Sans', sans-serif;
-                        padding: 24px 32px;
-                        max-width: 100%;
-                    }
+                    .print-wrapper { display: block !important; background: #fff; color: #111; font-family: 'DM Sans', sans-serif; padding: 24px 32px; max-width: 100%; }
                 }
             `}</style>
 
-            {/* ── Contenido de impresión (invisible en pantalla, visible al imprimir) ── */}
             <div className="print-wrapper" style={{ display: 'none' }}>
                 <PrintContenidoDia />
                 <PrintContenidoMes />
             </div>
 
-            {/* ── UI Normal ── */}
             <div className="ca-ui" style={{ maxWidth: 1060, width: '100%', animation: 'fadeUp 0.4s ease' }}>
 
-                {/* ── Top Nav ── */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 26 }}>
                     <div>
                         <button className="no-print" onClick={() => navigate('/dashboard')} style={backButtonStyle}>
@@ -640,7 +626,6 @@ const ControlAsistencia = () => {
                     </button>
                 </div>
 
-                {/* Aviso en modo mes sin búsqueda */}
                 {tipoFiltro === 'mes' && !busqueda && (
                     <div className="no-print" style={{ background: 'rgba(248,177,149,0.08)', border: '1px solid rgba(248,177,149,0.2)', borderRadius: 12, padding: '12px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
                         <AlertCircle size={16} color="#f8b195" />
@@ -650,14 +635,12 @@ const ControlAsistencia = () => {
                     </div>
                 )}
 
-                {/* ── Stats globales ── */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 22 }}>
                     <StatCard icon={<Users size={18} />} label="Total Empleados" value={totalEmpleados} color="#f8b195" />
                     <StatCard icon={<TrendingUp size={18} />} label={tipoFiltro === 'dia' ? 'Asistieron Hoy' : 'Registros del Mes'} value={totalAsistieron} color="#4ade80" />
                     <StatCard icon={<Calendar size={18} />} label="Asistencia Global" value={`${pctGlobal}%`} color={pctGlobal >= 85 ? '#4ade80' : pctGlobal >= 60 ? '#fbbf24' : '#f87171'} />
                 </div>
 
-                {/* ── Filtros ── */}
                 <div style={filterBarStyle}>
                     <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                         <div style={{ display: 'flex', background: 'rgba(0,0,0,0.4)', borderRadius: 10, padding: 3, border: '1px solid rgba(255,255,255,0.06)' }}>
@@ -682,7 +665,6 @@ const ControlAsistencia = () => {
                     </div>
                 </div>
 
-                {/* ── Sin resultados ── */}
                 {datosProcesados.length === 0 && (
                     <div style={{ textAlign: 'center', padding: '80px 0', color: 'rgba(255,255,255,0.15)' }}>
                         <Calendar size={44} color="rgba(255,255,255,0.08)" style={{ marginBottom: 14 }} />
@@ -690,7 +672,6 @@ const ControlAsistencia = () => {
                     </div>
                 )}
 
-                {/* ── Cards por cargo ── */}
                 {datosProcesados.map(cargo => {
                     const abierto = cargoAbierto === cargo.id_cargo;
                     const pctColor = cargo.porcentaje >= 85 ? '#4ade80' : cargo.porcentaje >= 60 ? '#fbbf24' : '#f87171';
