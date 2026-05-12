@@ -15,10 +15,16 @@ const GestionNomina = () => {
         const year = fechaActual.getFullYear();
         const month = fechaActual.getMonth();
         const ultimoDia = new Date(year, month + 1, 0).getDate();
+        const primerDiaSemana = new Date(year, month, 1).getDay(); // 0=Dom, 1=Lun...
+        // Convertir a lunes=0 ... domingo=6
+        const offset = (primerDiaSemana === 0 ? 6 : primerDiaSemana - 1);
         
         const dias = [];
+        // Celdas vacías al inicio
+        for (let i = 0; i < offset; i++) {
+            dias.push({ diaNumero: null, fechaCompleta: null, esDiaDePago: false });
+        }
         for (let i = 1; i <= ultimoDia; i++) {
-            // Formato YYYY-MM-DD garantizado
             const fechaString = `${year}-${String(month + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
             dias.push({ 
                 diaNumero: i, 
@@ -34,10 +40,12 @@ const GestionNomina = () => {
     };
 
     const irADetalle = (fechaCompleta) => {
+        if (!fechaCompleta) return;
         navigate(`/detalle-nomina/${fechaCompleta}`);
     };
 
     const nombreMeses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+    const diasSemana = ["L", "M", "X", "J", "V", "S", "D"];
 
     return (
         <div style={containerStyle}>
@@ -64,6 +72,13 @@ const GestionNomina = () => {
                         <button onClick={() => cambiarMes(1)} style={navButton}><ChevronRight size={24} /></button>
                     </div>
 
+                    {/* Cabecera días de la semana */}
+                    <div style={gridStyle}>
+                        {diasSemana.map((dia) => (
+                            <div key={dia} style={weekDayHeader}>{dia}</div>
+                        ))}
+                    </div>
+
                     <div style={gridStyle}>
                         {diasDelMes.map((diaInfo, index) => (
                             <div 
@@ -71,13 +86,22 @@ const GestionNomina = () => {
                                 onClick={() => irADetalle(diaInfo.fechaCompleta)}
                                 style={{
                                     ...dayStyle,
-                                    background: diaInfo.esDiaDePago ? 'rgba(246, 114, 128, 0.15)' : 'rgba(255,255,255,0.02)',
-                                    borderColor: diaInfo.esDiaDePago ? '#f67280' : 'rgba(255,255,255,0.05)',
-                                    cursor: 'pointer'
+                                    background: diaInfo.diaNumero === null
+                                        ? 'transparent'
+                                        : diaInfo.esDiaDePago ? 'rgba(246, 114, 128, 0.15)' : 'rgba(255,255,255,0.02)',
+                                    borderColor: diaInfo.diaNumero === null
+                                        ? 'transparent'
+                                        : diaInfo.esDiaDePago ? '#f67280' : 'rgba(255,255,255,0.05)',
+                                    cursor: diaInfo.diaNumero ? 'pointer' : 'default',
+                                    pointerEvents: diaInfo.diaNumero ? 'auto' : 'none',
                                 }}
                             >
-                                <span style={dayNumber}>{diaInfo.diaNumero}</span>
-                                {diaInfo.esDiaDePago && <span style={badgeStyle}>Día de Pago</span>}
+                                {diaInfo.diaNumero && (
+                                    <>
+                                        <span style={dayNumber}>{diaInfo.diaNumero}</span>
+                                        {diaInfo.esDiaDePago && <span style={badgeStyle}>Día de Pago</span>}
+                                    </>
+                                )}
                             </div>
                         ))}
                     </div>
@@ -100,6 +124,7 @@ const calendarHeader = { display: 'flex', justifyContent: 'space-between', align
 const monthTitle = { fontSize: 24, fontWeight: 700, margin: 0, color: '#fff' };
 const navButton = { background: 'rgba(255,255,255,0.05)', border: 'none', color: '#fff', borderRadius: '50%', width: 40, height: 40, display: 'flex', justifyContent: 'center', alignItems: 'center', cursor: 'pointer' };
 const gridStyle = { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 15 };
+const weekDayHeader = { textAlign: 'center', fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.35)', paddingBottom: 10, letterSpacing: 1 };
 const dayStyle = { borderRadius: 15, padding: '20px 10px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, transition: 'all 0.2s' };
 const dayNumber = { fontSize: 20, fontWeight: 700 };
 const badgeStyle = { fontSize: 10, background: '#f67280', color: '#fff', padding: '2px 8px', borderRadius: 10, fontWeight: 'bold' };
