@@ -24,11 +24,6 @@ const timeToMinutos = (t) => {
 const hoyStr = () => fechaToStr(new Date());
 
 // ─── Lógica de horas extra por registro de asistencia ────────────────────────
-// Reglas:
-//   - Entrada antes de hora contractual → se toma como entrada normal (no suma extra)
-//   - Entrada tarde ≤ 30 min → retardo, pero día completo, sin descuento
-//   - Salida hasta 20 min antes de hora contractual → día completo, sin penalización
-//   - Salida 21+ min después de hora contractual → TODAS esas horas cuentan como extra
 const calcularMinutosExtra = (asistencia, empHoraEntrada, empHoraSalida) => {
     const salidaReal      = timeToMinutos(asistencia.hora_salida);
     const salidaContrato  = timeToMinutos(empHoraSalida);
@@ -167,29 +162,33 @@ const DetalleNomina = () => {
                         cursor.setDate(cursor.getDate() + 1);
                     }
 
-                    // Contar días: solo pasados, asistió o es descanso
+                    // ── FIX: contar días correctamente ───────────────────────
+                    // Si el día tiene asistencia registrada en Supabase, SIEMPRE cuenta,
+                    // sin importar si la fecha parece "futura" según el reloj local.
+                    // Esto evita que registros ingresados manualmente o con diferencia
+                    // de zona horaria se ignoren incorrectamente.
                     let diasContados = 0;
                     diasDelPeriodo.forEach(diaStr => {
-                        if (diaStr > hoy) return; // ignorar días futuros
+                        // Si hay asistencia real registrada → cuenta siempre
+                        if (fechasAsistio.has(diaStr)) {
+                            diasContados++;
+                            return;
+                        }
+
+                        // Sin asistencia: ignorar días futuros (sin datos reales)
+                        if (diaStr > hoy) return;
 
                         const jsDay  = parseFecha(diaStr).getDay();
                         const bdDay  = jsDay === 0 ? 7 : jsDay;
                         const esDesc = bdDay === parseInt(emp.dia_descanso);
 
-                        if (fechasAsistio.has(diaStr)) {
-                            diasContados++;
-                        } else if (esDesc) {
+                        if (esDesc) {
                             diasContados++;
                         }
                         // Falta → no cuenta (descuento automático)
                     });
 
                     // ── Horas extra con reglas de tolerancia ─────────────────
-                    // Reglas aplicadas en calcularMinutosExtra():
-                    //   · Entrada antes de hora contractual → normal
-                    //   · Entrada tarde ≤ 30 min → retardo, día completo
-                    //   · Salida ≤ 20 min antes → día completo
-                    //   · Salida 21+ min después → TODOS esos minutos son extra
                     let totalMinutosExtra = 0;
                     asistenciasEmp
                         .filter(a => a.fecha >= primerDiaReal && a.fecha <= fechaFin)
