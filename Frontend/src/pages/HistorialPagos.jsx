@@ -22,6 +22,21 @@ const MESES = [
     'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'
 ];
 
+// ─── Helpers ───────────────────────────────────────────────────────────────
+const timeToMinutos = (t) => {
+    if (!t) return null;
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+};
+
+const calcularMinutosExtra = (asistencia, empHoraSalida) => {
+    const salidaReal     = timeToMinutos(asistencia.hora_salida);
+    const salidaContrato = timeToMinutos(empHoraSalida);
+    if (salidaReal === null || salidaContrato === null) return 0;
+    const desfase = salidaReal - salidaContrato;
+    return desfase > 20 ? desfase : 0;
+};
+
 const HistorialPagos = () => {
     const navigate  = useNavigate();
     const idEmpresa = localStorage.getItem('id_empresa');
@@ -47,13 +62,14 @@ const HistorialPagos = () => {
             const lastDay = new Date(anio, mesIdx+1, 0).getDate();
             const finStr  = `${anio}-${pad(mesIdx+1)}-${pad(lastDay)}`;
 
+            // 1. Pagos del mes
             const { data, error } = await supabase
                 .from('pagostotales')
                 .select(`
                     id_pago_total, fecha_inicio, fecha_fin, total_pago,
                     empleados (
                         id_empleado, nombre, pin_tarjeta, sueldo_base,
-                        pago_hora_extra, id_empresa,
+                        pago_hora_extra, hora_salida, id_empresa,
                         cargos ( nombre_cargo )
                     )
                 `)
@@ -65,7 +81,47 @@ const HistorialPagos = () => {
             const filtrados = (data || []).filter(p =>
                 p.empleados && String(p.empleados.id_empresa) === String(idEmpresa)
             );
-            setPagos(filtrados);
+
+            if (filtrados.length === 0) {
+                setPagos([]);
+                return;
+            }
+
+            // 2. Traer asistencias de todos los empleados en el rango de cada pago
+            const idsEmpleados = filtrados.map(p => p.empleados.id_empleado);
+
+            const { data: asistencias, error: errAsis } = await supabase
+                .from('registrosasistencia')
+                .select('id_empleado, fecha, hora_salida')
+                .in('id_empleado', idsEmpleados)
+                .gte('fecha', inicio)
+                .lte('fecha', finStr);
+
+            if (errAsis) throw errAsis;
+
+            // Mapa: id_empleado -> [asistencias]
+            const asisMap = {};
+            (asistencias || []).forEach(a => {
+                if (!asisMap[a.id_empleado]) asisMap[a.id_empleado] = [];
+                asisMap[a.id_empleado].push(a);
+            });
+
+            // 3. Para cada pago, calcular horas extra reales dentro de su período
+            const pagosConExtras = filtrados.map(p => {
+                const emp         = p.empleados;
+                const asisEmp     = (asisMap[emp.id_empleado] || []).filter(
+                    a => a.fecha >= p.fecha_inicio && a.fecha <= p.fecha_fin
+                );
+                let totalMinutosExtra = 0;
+                asisEmp.forEach(a => {
+                    totalMinutosExtra += calcularMinutosExtra(a, emp.hora_salida);
+                });
+                const totalHorasExtra  = Math.round((totalMinutosExtra / 60) * 100) / 100;
+                const montoHorasExtra  = Math.round(totalHorasExtra * (emp.pago_hora_extra || 0) * 100) / 100;
+                return { ...p, _horasExtra: totalHorasExtra, _montoHorasExtra: montoHorasExtra };
+            });
+
+            setPagos(pagosConExtras);
         } catch (err) {
             console.error(err.message);
         } finally {
@@ -80,16 +136,11 @@ const HistorialPagos = () => {
     );
 
     const totalEfectivoPagado = pagosFiltrados.reduce((s,p) => s + (p.total_pago||0), 0);
-    const empleadosUnicos = new Set(pagosFiltrados.map(p => p.empleados?.id_empleado)).size;
+    const empleadosUnicos     = new Set(pagosFiltrados.map(p => p.empleados?.id_empleado)).size;
 
-    let totalHorasExtra = 0;
-    let totalEfectivoBase = 0;
-    pagosFiltrados.forEach(p => {
-        const base   = p.empleados?.sueldo_base || 0;
-        const pagado = p.total_pago || 0;
-        totalEfectivoBase += base;
-        if (pagado > base) totalHorasExtra += pagado - base;
-    });
+    // Horas extra = suma de montos extra reales calculados
+    const totalHorasExtra    = pagosFiltrados.reduce((s,p) => s + (p._montoHorasExtra||0), 0);
+    const totalEfectivoBase  = pagosFiltrados.reduce((s,p) => s + (p.total_pago||0) - (p._montoHorasExtra||0), 0);
 
     const porcargo = {};
     pagosFiltrados.forEach(p => {
@@ -152,7 +203,6 @@ const HistorialPagos = () => {
         <div className="hp-root" style={S.root}>
           <div style={S.inner}>
 
-            {/* Print header */}
             <div className="hp-print-header" style={{ marginBottom:16, borderBottom:'2px solid #f8b195', paddingBottom:12 }}>
                 <div style={{ fontSize:22, fontWeight:800, fontFamily:"'Space Grotesk',sans-serif" }}>
                     Historial de Pagos — {MESES[mesIdx]} {anio}
@@ -162,7 +212,6 @@ const HistorialPagos = () => {
                 </div>
             </div>
 
-            {/* Botón volver — igual a backButtonStyle */}
             <button className="no-print" onClick={() => navigate('/gestion-nomina')} style={S.back}>
                 <ArrowLeft size={18}/> Volver a Nómina
             </button>
@@ -263,7 +312,6 @@ const HistorialPagos = () => {
                                     </div>
                                 </div>
                             ))}
-                            {/* Barra base vs extras */}
                             <div style={{display:'flex',gap:20,marginTop:20,paddingTop:16,borderTop:'1px solid rgba(255,255,255,.07)',flexWrap:'wrap'}}>
                                 <div style={{flex:1,minWidth:180}}>
                                     <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
@@ -286,7 +334,6 @@ const HistorialPagos = () => {
                             </div>
                         </div>
 
-                        {/* Donut */}
                         <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minWidth:170}}>
                             <Donut segments={cargosArr} total={totalEfectivoPagado}/>
                             <div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:'5px 12px',justifyContent:'center'}}>
@@ -322,11 +369,10 @@ const HistorialPagos = () => {
                             </thead>
                             <tbody>
                                 {pagosFiltrados.map(p => {
-                                    const base   = p.empleados?.sueldo_base||0;
-                                    const pagado = p.total_pago||0;
-                                    const extras = Math.max(0, pagado - base);
-                                    const ci     = cargosArr.findIndex(c=>c.nombre===(p.empleados?.cargos?.nombre_cargo||'Sin cargo'));
-                                    const col    = CARGO_COLORS[ci >= 0 ? ci % CARGO_COLORS.length : 0];
+                                    const montoExtra = p._montoHorasExtra || 0;
+                                    const base       = (p.total_pago || 0) - montoExtra;
+                                    const ci         = cargosArr.findIndex(c=>c.nombre===(p.empleados?.cargos?.nombre_cargo||'Sin cargo'));
+                                    const col        = CARGO_COLORS[ci >= 0 ? ci % CARGO_COLORS.length : 0];
                                     return (
                                         <tr key={p.id_pago_total} className="hp-tr">
                                             <td className="hp-td" style={S.td}>
@@ -351,11 +397,11 @@ const HistorialPagos = () => {
                                             <td className="hp-td" style={{...S.td,color:'#70a1ff',fontWeight:800,fontSize:14,fontFamily:"'Space Grotesk',sans-serif"}}>
                                                 Q{base.toLocaleString()}
                                             </td>
-                                            <td className="hp-td" style={{...S.td,color:extras>0?'#2ed573':'rgba(255,255,255,.25)',fontWeight:800,fontSize:14,fontFamily:"'Space Grotesk',sans-serif"}}>
-                                                {extras>0?`+Q${extras.toLocaleString()}`:'—'}
+                                            <td className="hp-td" style={{...S.td,color:montoExtra>0?'#2ed573':'rgba(255,255,255,.25)',fontWeight:800,fontSize:14,fontFamily:"'Space Grotesk',sans-serif"}}>
+                                                {montoExtra>0?`+Q${montoExtra.toFixed(2)}`:'—'}
                                             </td>
                                             <td className="hp-td" style={{...S.td,color:'#f8b195',fontWeight:800,fontSize:14,fontFamily:"'Space Grotesk',sans-serif"}}>
-                                                Q{pagado.toLocaleString()}
+                                                Q{(p.total_pago||0).toLocaleString()}
                                             </td>
                                         </tr>
                                     );
@@ -367,7 +413,7 @@ const HistorialPagos = () => {
                                         TOTALES — {MESES[mesIdx].toUpperCase()} {anio}
                                     </td>
                                     <td style={{...S.td,color:'#70a1ff',fontWeight:800,fontSize:14,paddingTop:16,fontFamily:"'Space Grotesk',sans-serif"}}>Q{totalEfectivoBase.toLocaleString()}</td>
-                                    <td style={{...S.td,color:'#2ed573',fontWeight:800,fontSize:14,paddingTop:16,fontFamily:"'Space Grotesk',sans-serif"}}>{totalHorasExtra>0?`+Q${totalHorasExtra.toLocaleString()}`:'—'}</td>
+                                    <td style={{...S.td,color:'#2ed573',fontWeight:800,fontSize:14,paddingTop:16,fontFamily:"'Space Grotesk',sans-serif"}}>{totalHorasExtra>0?`+Q${totalHorasExtra.toFixed(2)}`:'—'}</td>
                                     <td style={{...S.td,color:'#f8b195',fontWeight:800,fontSize:32,paddingTop:16,fontFamily:"'Space Grotesk',sans-serif"}}>Q{totalEfectivoPagado.toLocaleString()}</td>
                                 </tr>
                             </tfoot>
@@ -382,24 +428,19 @@ const HistorialPagos = () => {
     );
 };
 
-/* ── KPI card ── */
 const KPI = ({icon,label,value,sub,col}) => (
     <div className="hp-hover hp-card" style={{background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.08)',borderRadius:20,padding:'22px 24px'}}>
         <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:14}}>
             <div style={{width:42,height:42,borderRadius:12,background:`${col}18`,display:'flex',alignItems:'center',justifyContent:'center'}}>{icon}</div>
-            {/* labelStyle: 10px, uppercase, fontWeight 700 */}
             <span style={{fontSize:10,color:'rgba(255,255,255,.5)',fontWeight:700,textTransform:'uppercase',letterSpacing:.9,fontFamily:"'DM Sans',sans-serif"}}>
                 {label}
             </span>
         </div>
-        {/* titleStyle: Space Grotesk, 32px */}
         <div style={{fontSize:32,fontWeight:800,color:col,fontFamily:"'Space Grotesk',sans-serif",lineHeight:1}}>{value}</div>
-        {/* subtitleStyle: 14px, rgba .4 */}
         <div style={{fontSize:14,color:'rgba(255,255,255,.4)',marginTop:6,fontFamily:"'DM Sans',sans-serif"}}>{sub}</div>
     </div>
 );
 
-/* ── Donut SVG ── */
 const Donut = ({segments, total}) => {
     const R=58, sw=16, circ=2*Math.PI*R;
     let off=0;
@@ -426,16 +467,12 @@ const Donut = ({segments, total}) => {
     );
 };
 
-/* ── estilos ── */
 const S = {
     root:      { minHeight:'100vh', background:'#1a0a2e', padding:'3rem 2rem', color:'#fff', fontFamily:"'DM Sans',sans-serif", display:'flex', justifyContent:'center' },
     inner:     { maxWidth:1100, width:'100%' },
-    // backButtonStyle: transparent, #f67280, fontWeight 600, sin fontSize explícito
     back:      { background:'transparent', border:'none', color:'#f67280', display:'flex', alignItems:'center', gap:8, cursor:'pointer', marginBottom:25, fontWeight:600, fontFamily:"'DM Sans',sans-serif" },
     pageHead:  { display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap:16, marginBottom:22 },
-    // titleStyle: Space Grotesk, 32px, #f8b195, fontWeight 800
     title:     { fontSize:32, color:'#f8b195', margin:0, fontWeight:800, fontFamily:"'Space Grotesk',sans-serif" },
-    // subtitleStyle: DM Sans, 14px, rgba .4
     sub:       { color:'rgba(255,255,255,.4)', fontSize:14, marginTop:5, fontFamily:"'DM Sans',sans-serif" },
     controls:  { display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' },
     dropBtn:   { background:'rgba(255,255,255,.05)', border:'1px solid rgba(255,255,255,.1)', color:'#fff', borderRadius:10, padding:'10px 16px', fontSize:14, fontWeight:700, cursor:'pointer', display:'flex', alignItems:'center', gap:7, fontFamily:"'DM Sans',sans-serif" },
@@ -443,9 +480,7 @@ const S = {
     printBtn:  { background:'rgba(246,114,128,.15)', border:'1px solid #f67280', color:'#f67280', borderRadius:10, padding:'10px 18px', fontSize:14, fontWeight:700, cursor:'pointer', display:'flex', alignItems:'center', gap:8, fontFamily:"'DM Sans',sans-serif" },
     kpiRow:    { display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:16, marginBottom:24 },
     section:   { background:'rgba(255,255,255,.03)', border:'1px solid rgba(255,255,255,.08)', borderRadius:20, padding:'24px 26px' },
-    // sectionTitleStyle: 12px, uppercase, fontWeight 700, #f8b195, DM Sans
     secTitle:  { fontSize:12, fontWeight:700, color:'#f8b195', fontFamily:"'DM Sans',sans-serif", margin:'0 0 20px 0', textTransform:'uppercase', letterSpacing:.8 },
-    // th = labelStyle: 10px, uppercase, fontWeight 700
     th:        { padding:'12px 16px', textAlign:'left', fontSize:10, fontWeight:700, color:'#f8b195', textTransform:'uppercase', letterSpacing:.7, borderBottom:'1px solid rgba(255,255,255,.08)', whiteSpace:'nowrap', fontFamily:"'DM Sans',sans-serif" },
     td:        { padding:'15px 16px', verticalAlign:'middle', borderBottom:'1px solid rgba(255,255,255,.04)', fontFamily:"'DM Sans',sans-serif" },
     av:        { width:38, height:38, borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center', color:'#1a0a2e', fontWeight:800, fontSize:16, flexShrink:0, fontFamily:"'Space Grotesk',sans-serif" },
