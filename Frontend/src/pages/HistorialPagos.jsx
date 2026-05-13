@@ -6,12 +6,6 @@ import {
     DollarSign, TrendingUp, Printer, ChevronDown, Users, Clock
 } from 'lucide-react';
 
-const C = {
-    bg: '#1a0a2e', card: 'rgba(255,255,255,0.03)',
-    border: 'rgba(255,255,255,0.08)', accent: '#f8b195',
-    red: '#f67280', green: '#2ed573', muted: 'rgba(255,255,255,0.35)', white: '#ffffff',
-};
-
 const CARGO_COLORS = [
     '#f67280','#f8b195','#2ed573','#70a1ff',
     '#ffa502','#eccc68','#a29bfe','#fd79a8','#00cec9','#e17055',
@@ -22,19 +16,21 @@ const MESES = [
     'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'
 ];
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
 const timeToMinutos = (t) => {
     if (!t) return null;
     const [h, m] = t.split(':').map(Number);
     return h * 60 + m;
 };
 
-const calcularMinutosExtra = (asistencia, empHoraSalida) => {
+const calcularHorasExtra = (asistencia, empHoraSalida) => {
     const salidaReal     = timeToMinutos(asistencia.hora_salida);
     const salidaContrato = timeToMinutos(empHoraSalida);
     if (salidaReal === null || salidaContrato === null) return 0;
     const desfase = salidaReal - salidaContrato;
-    return desfase > 20 ? desfase : 0;
+    if (desfase <= 20) return 0;
+    const horasCompletas   = Math.floor(desfase / 60);
+    const minutosRestantes = desfase % 60;
+    return horasCompletas + (minutosRestantes >= 30 ? 1 : 0);
 };
 
 const HistorialPagos = () => {
@@ -62,7 +58,6 @@ const HistorialPagos = () => {
             const lastDay = new Date(anio, mesIdx+1, 0).getDate();
             const finStr  = `${anio}-${pad(mesIdx+1)}-${pad(lastDay)}`;
 
-            // 1. Pagos del mes
             const { data, error } = await supabase
                 .from('pagostotales')
                 .select(`
@@ -82,12 +77,8 @@ const HistorialPagos = () => {
                 p.empleados && String(p.empleados.id_empresa) === String(idEmpresa)
             );
 
-            if (filtrados.length === 0) {
-                setPagos([]);
-                return;
-            }
+            if (filtrados.length === 0) { setPagos([]); return; }
 
-            // 2. Traer asistencias de todos los empleados en el rango de cada pago
             const idsEmpleados = filtrados.map(p => p.empleados.id_empleado);
 
             const { data: asistencias, error: errAsis } = await supabase
@@ -99,25 +90,22 @@ const HistorialPagos = () => {
 
             if (errAsis) throw errAsis;
 
-            // Mapa: id_empleado -> [asistencias]
             const asisMap = {};
             (asistencias || []).forEach(a => {
                 if (!asisMap[a.id_empleado]) asisMap[a.id_empleado] = [];
                 asisMap[a.id_empleado].push(a);
             });
 
-            // 3. Para cada pago, calcular horas extra reales dentro de su período
             const pagosConExtras = filtrados.map(p => {
-                const emp         = p.empleados;
-                const asisEmp     = (asisMap[emp.id_empleado] || []).filter(
+                const emp     = p.empleados;
+                const asisEmp = (asisMap[emp.id_empleado] || []).filter(
                     a => a.fecha >= p.fecha_inicio && a.fecha <= p.fecha_fin
                 );
-                let totalMinutosExtra = 0;
+                let totalHorasExtra = 0;
                 asisEmp.forEach(a => {
-                    totalMinutosExtra += calcularMinutosExtra(a, emp.hora_salida);
+                    totalHorasExtra += calcularHorasExtra(a, emp.hora_salida);
                 });
-                const totalHorasExtra  = Math.round((totalMinutosExtra / 60) * 100) / 100;
-                const montoHorasExtra  = Math.round(totalHorasExtra * (emp.pago_hora_extra || 0) * 100) / 100;
+                const montoHorasExtra = Math.round(totalHorasExtra * (emp.pago_hora_extra || 0) * 100) / 100;
                 return { ...p, _horasExtra: totalHorasExtra, _montoHorasExtra: montoHorasExtra };
             });
 
@@ -137,10 +125,9 @@ const HistorialPagos = () => {
 
     const totalEfectivoPagado = pagosFiltrados.reduce((s,p) => s + (p.total_pago||0), 0);
     const empleadosUnicos     = new Set(pagosFiltrados.map(p => p.empleados?.id_empleado)).size;
-
-    // Horas extra = suma de montos extra reales calculados
-    const totalHorasExtra    = pagosFiltrados.reduce((s,p) => s + (p._montoHorasExtra||0), 0);
-    const totalEfectivoBase  = pagosFiltrados.reduce((s,p) => s + (p.total_pago||0) - (p._montoHorasExtra||0), 0);
+    const totalHorasExtra     = pagosFiltrados.reduce((s,p) => s + (p._horasExtra||0), 0);
+    const totalMontoExtra     = pagosFiltrados.reduce((s,p) => s + (p._montoHorasExtra||0), 0);
+    const totalEfectivoBase   = pagosFiltrados.reduce((s,p) => s + (p.total_pago||0) - (p._montoHorasExtra||0), 0);
 
     const porcargo = {};
     pagosFiltrados.forEach(p => {
@@ -157,7 +144,7 @@ const HistorialPagos = () => {
         }))
         .sort((a,b) => b.total - a.total);
 
-    const pctExtras = totalEfectivoPagado>0 ? ((totalHorasExtra/totalEfectivoPagado)*100).toFixed(1) : 0;
+    const pctExtras = totalEfectivoPagado>0 ? ((totalMontoExtra/totalEfectivoPagado)*100).toFixed(1) : 0;
     const pctBase   = totalEfectivoPagado>0 ? (100 - parseFloat(pctExtras)).toFixed(1) : 100;
 
     const handlePrint = () => window.print();
@@ -218,9 +205,7 @@ const HistorialPagos = () => {
 
             <div style={S.pageHead}>
                 <div>
-                    <h1 style={S.title}>
-                        Historial de <span style={{color:'#ffffff'}}>Pagos</span>
-                    </h1>
+                    <h1 style={S.title}>Historial de <span style={{color:'#ffffff'}}>Pagos</span></h1>
                     <p style={S.sub}>Reporte financiero detallado · {MESES[mesIdx]} {anio}</p>
                 </div>
                 <div className="no-print" style={S.controls}>
@@ -268,11 +253,10 @@ const HistorialPagos = () => {
             {cargando ? (
                 <div style={S.center}>
                     <Loader2 size={36} color="#f8b195"/>
-                    <p style={{color:'rgba(255,255,255,.4)', fontSize:14, fontFamily:"'DM Sans',sans-serif"}}>Cargando…</p>
+                    <p style={{color:'rgba(255,255,255,.4)',fontSize:14}}>Cargando…</p>
                 </div>
             ) : (<>
 
-                {/* ══ KPIs ══ */}
                 <div style={S.kpiRow}>
                     <KPI icon={<DollarSign size={22} color="#f8b195"/>} label="Total Efectivo Pagado"
                         value={`Q${totalEfectivoPagado.toLocaleString()}`}
@@ -281,14 +265,13 @@ const HistorialPagos = () => {
                         value={empleadosUnicos}
                         sub={`${cargosArr.length} cargo${cargosArr.length!==1?'s':''}`} col="#f67280"/>
                     <KPI icon={<Clock size={22} color="#2ed573"/>} label="Total Horas Extra"
-                        value={`Q${totalHorasExtra.toLocaleString()}`}
-                        sub={`${pctExtras}% del total`} col="#2ed573"/>
+                        value={`${totalHorasExtra}h`}
+                        sub={`Q${totalMontoExtra.toFixed(2)} en extras`} col="#2ed573"/>
                     <KPI icon={<TrendingUp size={22} color="#70a1ff"/>} label="Total Efectivo Base"
                         value={`Q${totalEfectivoBase.toLocaleString()}`}
                         sub={`${pctBase}% del total`} col="#70a1ff"/>
                 </div>
 
-                {/* ══ Distribución por cargo ══ */}
                 {cargosArr.length > 0 && (
                 <div className="hp-section" style={{...S.section, marginBottom:20}}>
                     <h2 style={S.secTitle}>Distribución por Cargo</h2>
@@ -299,12 +282,12 @@ const HistorialPagos = () => {
                                     <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
                                         <div style={{display:'flex',alignItems:'center',gap:9}}>
                                             <span style={{width:10,height:10,borderRadius:'50%',background:c.color,display:'inline-block'}}/>
-                                            <span style={{fontSize:14,fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>{c.nombre}</span>
-                                            <span style={{fontSize:10,color:'rgba(255,255,255,.4)',fontWeight:700,textTransform:'uppercase',fontFamily:"'DM Sans',sans-serif"}}>({c.count} emp.)</span>
+                                            <span style={{fontSize:14,fontWeight:700}}>{c.nombre}</span>
+                                            <span style={{fontSize:10,color:'rgba(255,255,255,.4)',fontWeight:700,textTransform:'uppercase'}}>({c.count} emp.)</span>
                                         </div>
                                         <div>
-                                            <span style={{fontSize:15,fontWeight:800,color:c.color,fontFamily:"'Space Grotesk',sans-serif"}}>Q{c.total.toLocaleString()}</span>
-                                            <span style={{fontSize:10,color:'rgba(255,255,255,.4)',marginLeft:7,fontWeight:700,textTransform:'uppercase',fontFamily:"'DM Sans',sans-serif"}}>{c.pct}%</span>
+                                            <span style={{fontSize:15,fontWeight:800,color:c.color}}>Q{c.total.toLocaleString()}</span>
+                                            <span style={{fontSize:10,color:'rgba(255,255,255,.4)',marginLeft:7,fontWeight:700,textTransform:'uppercase'}}>{c.pct}%</span>
                                         </div>
                                     </div>
                                     <div style={{height:10,background:'rgba(255,255,255,.06)',borderRadius:99,overflow:'hidden'}}>
@@ -315,8 +298,8 @@ const HistorialPagos = () => {
                             <div style={{display:'flex',gap:20,marginTop:20,paddingTop:16,borderTop:'1px solid rgba(255,255,255,.07)',flexWrap:'wrap'}}>
                                 <div style={{flex:1,minWidth:180}}>
                                     <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
-                                        <span style={{fontSize:14,fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>💼 Sueldo Base</span>
-                                        <span style={{fontSize:14,color:'#70a1ff',fontWeight:800,fontFamily:"'Space Grotesk',sans-serif"}}>Q{totalEfectivoBase.toLocaleString()} · {pctBase}%</span>
+                                        <span style={{fontSize:14,fontWeight:700}}>💼 Sueldo Base</span>
+                                        <span style={{fontSize:14,color:'#70a1ff',fontWeight:800}}>Q{totalEfectivoBase.toLocaleString()} · {pctBase}%</span>
                                     </div>
                                     <div style={{height:9,background:'rgba(255,255,255,.06)',borderRadius:99,overflow:'hidden'}}>
                                         <div className="hp-bar" style={{height:'100%',width:`${pctBase}%`,background:'linear-gradient(90deg,#70a1ff66,#70a1ff)',borderRadius:99}}/>
@@ -324,8 +307,8 @@ const HistorialPagos = () => {
                                 </div>
                                 <div style={{flex:1,minWidth:180}}>
                                     <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
-                                        <span style={{fontSize:14,fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>⏱ Horas Extra</span>
-                                        <span style={{fontSize:14,color:'#2ed573',fontWeight:800,fontFamily:"'Space Grotesk',sans-serif"}}>Q{totalHorasExtra.toLocaleString()} · {pctExtras}%</span>
+                                        <span style={{fontSize:14,fontWeight:700}}>⏱ Horas Extra</span>
+                                        <span style={{fontSize:14,color:'#2ed573',fontWeight:800}}>Q{totalMontoExtra.toLocaleString()} · {pctExtras}%</span>
                                     </div>
                                     <div style={{height:9,background:'rgba(255,255,255,.06)',borderRadius:99,overflow:'hidden'}}>
                                         <div className="hp-bar" style={{height:'100%',width:`${pctExtras}%`,background:'linear-gradient(90deg,#2ed57366,#2ed573)',borderRadius:99}}/>
@@ -333,12 +316,11 @@ const HistorialPagos = () => {
                                 </div>
                             </div>
                         </div>
-
                         <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minWidth:170}}>
                             <Donut segments={cargosArr} total={totalEfectivoPagado}/>
                             <div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:'5px 12px',justifyContent:'center'}}>
                                 {cargosArr.map(c=>(
-                                    <span key={c.nombre} style={{display:'flex',alignItems:'center',gap:5,fontSize:10,color:'rgba(255,255,255,.5)',fontWeight:700,textTransform:'uppercase',fontFamily:"'DM Sans',sans-serif"}}>
+                                    <span key={c.nombre} style={{display:'flex',alignItems:'center',gap:5,fontSize:10,color:'rgba(255,255,255,.5)',fontWeight:700,textTransform:'uppercase'}}>
                                         <span style={{width:8,height:8,borderRadius:'50%',background:c.color,display:'inline-block'}}/>
                                         {c.nombre}
                                     </span>
@@ -349,17 +331,16 @@ const HistorialPagos = () => {
                 </div>
                 )}
 
-                {/* ══ Tabla detallada ══ */}
                 <div className="hp-section" style={S.section}>
                     <h2 style={S.secTitle}>Registros Detallados</h2>
                     {pagosFiltrados.length===0 ? (
                         <div style={S.center}>
                             <AlertCircle size={40} color="rgba(255,255,255,.15)"/>
-                            <p style={{color:'rgba(255,255,255,.35)',fontSize:14,fontFamily:"'DM Sans',sans-serif"}}>Sin registros para este periodo.</p>
+                            <p style={{color:'rgba(255,255,255,.35)',fontSize:14}}>Sin registros para este periodo.</p>
                         </div>
                     ) : (
                     <div style={{overflowX:'auto'}}>
-                        <table style={{width:'100%',borderCollapse:'collapse',fontSize:14,fontFamily:"'DM Sans',sans-serif"}}>
+                        <table style={{width:'100%',borderCollapse:'collapse',fontSize:14}}>
                             <thead>
                                 <tr>
                                     {['Empleado','Cargo','Periodo','Sueldo Base','Extras','Total Pagado'].map(h=>(
@@ -370,6 +351,7 @@ const HistorialPagos = () => {
                             <tbody>
                                 {pagosFiltrados.map(p => {
                                     const montoExtra = p._montoHorasExtra || 0;
+                                    const horasExtra = p._horasExtra || 0;
                                     const base       = (p.total_pago || 0) - montoExtra;
                                     const ci         = cargosArr.findIndex(c=>c.nombre===(p.empleados?.cargos?.nombre_cargo||'Sin cargo'));
                                     const col        = CARGO_COLORS[ci >= 0 ? ci % CARGO_COLORS.length : 0];
@@ -381,26 +363,26 @@ const HistorialPagos = () => {
                                                         {p.empleados?.nombre?.charAt(0)}
                                                     </div>
                                                     <div>
-                                                        <div style={{fontWeight:700,fontSize:14,fontFamily:"'DM Sans',sans-serif"}}>{p.empleados?.nombre}</div>
-                                                        <div style={{fontSize:10,color:'rgba(255,255,255,.4)',fontWeight:700,textTransform:'uppercase',fontFamily:"'DM Sans',sans-serif"}}>PIN: {p.empleados?.pin_tarjeta}</div>
+                                                        <div style={{fontWeight:700,fontSize:14}}>{p.empleados?.nombre}</div>
+                                                        <div style={{fontSize:10,color:'rgba(255,255,255,.4)',fontWeight:700,textTransform:'uppercase'}}>PIN: {p.empleados?.pin_tarjeta}</div>
                                                     </div>
                                                 </div>
                                             </td>
                                             <td className="hp-td" style={S.td}>
-                                                <span style={{fontSize:12,padding:'4px 12px',borderRadius:20,fontWeight:700,background:`${col}22`,color:col,fontFamily:"'DM Sans',sans-serif"}}>
+                                                <span style={{fontSize:12,padding:'4px 12px',borderRadius:20,fontWeight:700,background:`${col}22`,color:col}}>
                                                     {p.empleados?.cargos?.nombre_cargo||'Sin cargo'}
                                                 </span>
                                             </td>
-                                            <td className="hp-td" style={{...S.td,fontSize:14,color:'rgba(255,255,255,.5)',fontFamily:"'DM Sans',sans-serif"}}>
+                                            <td className="hp-td" style={{...S.td,fontSize:14,color:'rgba(255,255,255,.5)'}}>
                                                 {fmt(p.fecha_inicio)} → {fmt(p.fecha_fin)}
                                             </td>
-                                            <td className="hp-td" style={{...S.td,color:'#70a1ff',fontWeight:800,fontSize:14,fontFamily:"'Space Grotesk',sans-serif"}}>
+                                            <td className="hp-td" style={{...S.td,color:'#70a1ff',fontWeight:800,fontSize:14}}>
                                                 Q{base.toLocaleString()}
                                             </td>
-                                            <td className="hp-td" style={{...S.td,color:montoExtra>0?'#2ed573':'rgba(255,255,255,.25)',fontWeight:800,fontSize:14,fontFamily:"'Space Grotesk',sans-serif"}}>
-                                                {montoExtra>0?`+Q${montoExtra.toFixed(2)}`:'—'}
+                                            <td className="hp-td" style={{...S.td,color:montoExtra>0?'#2ed573':'rgba(255,255,255,.25)',fontWeight:800,fontSize:14}}>
+                                                {montoExtra>0 ? `${horasExtra}h · +Q${montoExtra.toFixed(2)}` : '—'}
                                             </td>
-                                            <td className="hp-td" style={{...S.td,color:'#f8b195',fontWeight:800,fontSize:14,fontFamily:"'Space Grotesk',sans-serif"}}>
+                                            <td className="hp-td" style={{...S.td,color:'#f8b195',fontWeight:800,fontSize:14}}>
                                                 Q{(p.total_pago||0).toLocaleString()}
                                             </td>
                                         </tr>
@@ -409,12 +391,14 @@ const HistorialPagos = () => {
                             </tbody>
                             <tfoot>
                                 <tr style={{borderTop:'2px solid rgba(255,255,255,.1)'}}>
-                                    <td colSpan={3} style={{...S.td,fontWeight:700,fontSize:10,color:'rgba(255,255,255,.5)',paddingTop:16,textTransform:'uppercase',letterSpacing:.9,fontFamily:"'DM Sans',sans-serif"}}>
+                                    <td colSpan={3} style={{...S.td,fontWeight:700,fontSize:10,color:'rgba(255,255,255,.5)',paddingTop:16,textTransform:'uppercase',letterSpacing:.9}}>
                                         TOTALES — {MESES[mesIdx].toUpperCase()} {anio}
                                     </td>
-                                    <td style={{...S.td,color:'#70a1ff',fontWeight:800,fontSize:14,paddingTop:16,fontFamily:"'Space Grotesk',sans-serif"}}>Q{totalEfectivoBase.toLocaleString()}</td>
-                                    <td style={{...S.td,color:'#2ed573',fontWeight:800,fontSize:14,paddingTop:16,fontFamily:"'Space Grotesk',sans-serif"}}>{totalHorasExtra>0?`+Q${totalHorasExtra.toFixed(2)}`:'—'}</td>
-                                    <td style={{...S.td,color:'#f8b195',fontWeight:800,fontSize:32,paddingTop:16,fontFamily:"'Space Grotesk',sans-serif"}}>Q{totalEfectivoPagado.toLocaleString()}</td>
+                                    <td style={{...S.td,color:'#70a1ff',fontWeight:800,fontSize:14,paddingTop:16}}>Q{totalEfectivoBase.toLocaleString()}</td>
+                                    <td style={{...S.td,color:'#2ed573',fontWeight:800,fontSize:14,paddingTop:16}}>
+                                        {totalMontoExtra>0 ? `${totalHorasExtra}h · +Q${totalMontoExtra.toFixed(2)}` : '—'}
+                                    </td>
+                                    <td style={{...S.td,color:'#f8b195',fontWeight:800,fontSize:32,paddingTop:16}}>Q{totalEfectivoPagado.toLocaleString()}</td>
                                 </tr>
                             </tfoot>
                         </table>
@@ -432,12 +416,10 @@ const KPI = ({icon,label,value,sub,col}) => (
     <div className="hp-hover hp-card" style={{background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.08)',borderRadius:20,padding:'22px 24px'}}>
         <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:14}}>
             <div style={{width:42,height:42,borderRadius:12,background:`${col}18`,display:'flex',alignItems:'center',justifyContent:'center'}}>{icon}</div>
-            <span style={{fontSize:10,color:'rgba(255,255,255,.5)',fontWeight:700,textTransform:'uppercase',letterSpacing:.9,fontFamily:"'DM Sans',sans-serif"}}>
-                {label}
-            </span>
+            <span style={{fontSize:10,color:'rgba(255,255,255,.5)',fontWeight:700,textTransform:'uppercase',letterSpacing:.9}}>{label}</span>
         </div>
-        <div style={{fontSize:32,fontWeight:800,color:col,fontFamily:"'Space Grotesk',sans-serif",lineHeight:1}}>{value}</div>
-        <div style={{fontSize:14,color:'rgba(255,255,255,.4)',marginTop:6,fontFamily:"'DM Sans',sans-serif"}}>{sub}</div>
+        <div style={{fontSize:32,fontWeight:800,color:col,lineHeight:1}}>{value}</div>
+        <div style={{fontSize:14,color:'rgba(255,255,255,.4)',marginTop:6}}>{sub}</div>
     </div>
 );
 
@@ -468,23 +450,23 @@ const Donut = ({segments, total}) => {
 };
 
 const S = {
-    root:      { minHeight:'100vh', background:'#1a0a2e', padding:'3rem 2rem', color:'#fff', fontFamily:"'DM Sans',sans-serif", display:'flex', justifyContent:'center' },
-    inner:     { maxWidth:1100, width:'100%' },
-    back:      { background:'transparent', border:'none', color:'#f67280', display:'flex', alignItems:'center', gap:8, cursor:'pointer', marginBottom:25, fontWeight:600, fontFamily:"'DM Sans',sans-serif" },
-    pageHead:  { display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap:16, marginBottom:22 },
-    title:     { fontSize:32, color:'#f8b195', margin:0, fontWeight:800, fontFamily:"'Space Grotesk',sans-serif" },
-    sub:       { color:'rgba(255,255,255,.4)', fontSize:14, marginTop:5, fontFamily:"'DM Sans',sans-serif" },
-    controls:  { display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' },
-    dropBtn:   { background:'rgba(255,255,255,.05)', border:'1px solid rgba(255,255,255,.1)', color:'#fff', borderRadius:10, padding:'10px 16px', fontSize:14, fontWeight:700, cursor:'pointer', display:'flex', alignItems:'center', gap:7, fontFamily:"'DM Sans',sans-serif" },
-    search:    { background:'rgba(255,255,255,.05)', border:'1px solid rgba(255,255,255,.1)', borderRadius:10, padding:'10px 12px 10px 36px', color:'#fff', outline:'none', fontSize:14, width:200, fontFamily:"'DM Sans',sans-serif" },
-    printBtn:  { background:'rgba(246,114,128,.15)', border:'1px solid #f67280', color:'#f67280', borderRadius:10, padding:'10px 18px', fontSize:14, fontWeight:700, cursor:'pointer', display:'flex', alignItems:'center', gap:8, fontFamily:"'DM Sans',sans-serif" },
-    kpiRow:    { display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:16, marginBottom:24 },
-    section:   { background:'rgba(255,255,255,.03)', border:'1px solid rgba(255,255,255,.08)', borderRadius:20, padding:'24px 26px' },
-    secTitle:  { fontSize:12, fontWeight:700, color:'#f8b195', fontFamily:"'DM Sans',sans-serif", margin:'0 0 20px 0', textTransform:'uppercase', letterSpacing:.8 },
-    th:        { padding:'12px 16px', textAlign:'left', fontSize:10, fontWeight:700, color:'#f8b195', textTransform:'uppercase', letterSpacing:.7, borderBottom:'1px solid rgba(255,255,255,.08)', whiteSpace:'nowrap', fontFamily:"'DM Sans',sans-serif" },
-    td:        { padding:'15px 16px', verticalAlign:'middle', borderBottom:'1px solid rgba(255,255,255,.04)', fontFamily:"'DM Sans',sans-serif" },
-    av:        { width:38, height:38, borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center', color:'#1a0a2e', fontWeight:800, fontSize:16, flexShrink:0, fontFamily:"'Space Grotesk',sans-serif" },
-    center:    { textAlign:'center', padding:'60px 0', display:'flex', flexDirection:'column', alignItems:'center', gap:14 },
+    root:     { minHeight:'100vh', background:'#1a0a2e', padding:'3rem 2rem', color:'#fff', fontFamily:"'DM Sans',sans-serif", display:'flex', justifyContent:'center' },
+    inner:    { maxWidth:1100, width:'100%' },
+    back:     { background:'transparent', border:'none', color:'#f67280', display:'flex', alignItems:'center', gap:8, cursor:'pointer', marginBottom:25, fontWeight:600 },
+    pageHead: { display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap:16, marginBottom:22 },
+    title:    { fontSize:32, color:'#f8b195', margin:0, fontWeight:800, fontFamily:"'Space Grotesk',sans-serif" },
+    sub:      { color:'rgba(255,255,255,.4)', fontSize:14, marginTop:5 },
+    controls: { display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' },
+    dropBtn:  { background:'rgba(255,255,255,.05)', border:'1px solid rgba(255,255,255,.1)', color:'#fff', borderRadius:10, padding:'10px 16px', fontSize:14, fontWeight:700, cursor:'pointer', display:'flex', alignItems:'center', gap:7 },
+    search:   { background:'rgba(255,255,255,.05)', border:'1px solid rgba(255,255,255,.1)', borderRadius:10, padding:'10px 12px 10px 36px', color:'#fff', outline:'none', fontSize:14, width:200 },
+    printBtn: { background:'rgba(246,114,128,.15)', border:'1px solid #f67280', color:'#f67280', borderRadius:10, padding:'10px 18px', fontSize:14, fontWeight:700, cursor:'pointer', display:'flex', alignItems:'center', gap:8 },
+    kpiRow:   { display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:16, marginBottom:24 },
+    section:  { background:'rgba(255,255,255,.03)', border:'1px solid rgba(255,255,255,.08)', borderRadius:20, padding:'24px 26px' },
+    secTitle: { fontSize:12, fontWeight:700, color:'#f8b195', margin:'0 0 20px 0', textTransform:'uppercase', letterSpacing:.8 },
+    th:       { padding:'12px 16px', textAlign:'left', fontSize:10, fontWeight:700, color:'#f8b195', textTransform:'uppercase', letterSpacing:.7, borderBottom:'1px solid rgba(255,255,255,.08)', whiteSpace:'nowrap' },
+    td:       { padding:'15px 16px', verticalAlign:'middle', borderBottom:'1px solid rgba(255,255,255,.04)' },
+    av:       { width:38, height:38, borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center', color:'#1a0a2e', fontWeight:800, fontSize:16, flexShrink:0 },
+    center:   { textAlign:'center', padding:'60px 0', display:'flex', flexDirection:'column', alignItems:'center', gap:14 },
 };
 
 export default HistorialPagos;

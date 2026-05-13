@@ -3,7 +3,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { ArrowLeft, Search, CheckCircle, Loader2, AlertCircle, Briefcase, X, Clock, Calendar, Moon } from 'lucide-react';
 
-// ─── Helpers de fecha en hora LOCAL (sin UTC drift) ───────────────────────────
 const parseFecha = (str) => {
     const [y, m, d] = str.split('-').map(Number);
     return new Date(y, m - 1, d);
@@ -14,28 +13,22 @@ const fechaToStr = (d) => {
     const day = String(d.getDate()).padStart(2, '0');
     return `${y}-${m}-${day}`;
 };
-// "HH:MM" o "HH:MM:SS" → minutos totales desde medianoche
 const timeToMinutos = (t) => {
     if (!t) return null;
     const [h, m] = t.split(':').map(Number);
     return h * 60 + m;
 };
-// Fecha de hoy en hora local como "YYYY-MM-DD"
 const hoyStr = () => fechaToStr(new Date());
 
-// ─── Lógica de horas extra por registro de asistencia ────────────────────────
-const calcularMinutosExtra = (asistencia, empHoraEntrada, empHoraSalida) => {
-    const salidaReal      = timeToMinutos(asistencia.hora_salida);
-    const salidaContrato  = timeToMinutos(empHoraSalida);
-
+const calcularHorasExtra = (asistencia, empHoraSalida) => {
+    const salidaReal     = timeToMinutos(asistencia.hora_salida);
+    const salidaContrato = timeToMinutos(empHoraSalida);
     if (salidaReal === null || salidaContrato === null) return 0;
-
-    const minutosDesfase = salidaReal - salidaContrato;
-
-    // Sale 21+ minutos después → hora extra (se cuenta todo el tiempo extra desde min 1)
-    if (minutosDesfase > 20) return minutosDesfase;
-
-    return 0;
+    const desfase = salidaReal - salidaContrato;
+    if (desfase <= 20) return 0;
+    const horasCompletas   = Math.floor(desfase / 60);
+    const minutosRestantes = desfase % 60;
+    return horasCompletas + (minutosRestantes >= 30 ? 1 : 0);
 };
 
 const DetalleNomina = () => {
@@ -70,7 +63,6 @@ const DetalleNomina = () => {
             const fechaFin       = fecha;
             const hoy            = hoyStr();
 
-            // 1. Empleados ya pagados en esta fecha de corte
             const { data: pagosData, error: errorPagos } = await supabase
                 .from('pagostotales')
                 .select('id_empleado')
@@ -79,7 +71,6 @@ const DetalleNomina = () => {
             const idsPagados = new Set(pagosData.map(p => p.id_empleado));
             setPagados(idsPagados);
 
-            // 2. Empleados de la empresa
             const { data: empData, error: empError } = await supabase
                 .from('empleados')
                 .select(`
@@ -92,7 +83,6 @@ const DetalleNomina = () => {
 
             const idsEmpleados = empData.map(e => e.id_empleado);
 
-            // 3. Asistencias del mes completo (con horas para calcular extras)
             const { data: asistencias, error: errAsis } = await supabase
                 .from('registrosasistencia')
                 .select('id_empleado, fecha, hora_entrada, hora_salida')
@@ -101,14 +91,12 @@ const DetalleNomina = () => {
                 .lte('fecha', fechaFin);
             if (errAsis) throw errAsis;
 
-            // Mapa: id_empleado -> [{ fecha, hora_entrada, hora_salida }]
             const asisMap = {};
             asistencias.forEach(a => {
                 if (!asisMap[a.id_empleado]) asisMap[a.id_empleado] = [];
                 asisMap[a.id_empleado].push(a);
             });
 
-            // 4. Calcular pago por empleado
             const filtrados = empData
                 .filter(emp => {
                     const modo = emp.tipo_pago?.trim().toLowerCase();
@@ -129,18 +117,15 @@ const DetalleNomina = () => {
                             ? fechaInicioMes
                             : fechaInicioQ2;
 
-                    // Pago diario siempre sobre días reales del mes
                     const pagoDiario = emp.sueldo_base / ultimoDia;
 
                     const asistenciasEmp = asisMap[emp.id_empleado] || [];
                     const fechasAsistio  = new Set(asistenciasEmp.map(a => a.fecha));
 
-                    // Sin asistencias → Q0
                     if (fechasAsistio.size === 0) {
                         return mkResult(emp, pagoDiario, ultimoDia, 0, 0, 0, 0, 0, null);
                     }
 
-                    // Primera asistencia dentro del período actual
                     const fechasPeriodo = asistenciasEmp
                         .map(a => a.fecha)
                         .filter(f => f >= periodoInicio && f <= fechaFin)
@@ -152,7 +137,6 @@ const DetalleNomina = () => {
 
                     const primerDiaReal = fechasPeriodo[0];
 
-                    // Generar días del período (hora local, sin UTC drift)
                     const dInicio = parseFecha(primerDiaReal);
                     const dFin    = parseFecha(fechaFin);
                     const diasDelPeriodo = [];
@@ -162,11 +146,8 @@ const DetalleNomina = () => {
                         cursor.setDate(cursor.getDate() + 1);
                     }
 
-                    // ── Contar días reales y días dobles por separado ────────
-                    // diasTrabajados: días reales del calendario en que asistió
-                    // diasDobles: cuántos de esos días eran día de descanso (pago extra)
-                    let diasTrabajados = 0;  // días reales trabajados
-                    let diasDobles     = 0;  // de esos, cuántos fueron en día de descanso
+                    let diasTrabajados = 0;
+                    let diasDobles     = 0;
 
                     diasDelPeriodo.forEach(diaStr => {
                         if (fechasAsistio.has(diaStr)) {
@@ -177,32 +158,23 @@ const DetalleNomina = () => {
                             if (esDescA) diasDobles++;
                             return;
                         }
-
-                        // Sin asistencia: ignorar días futuros
                         if (diaStr > hoy) return;
-
                         const jsDay  = parseFecha(diaStr).getDay();
                         const bdDay  = jsDay === 0 ? 7 : jsDay;
                         const esDesc = bdDay === parseInt(emp.dia_descanso);
-
-                        // Día de descanso sin asistencia → igual se paga
                         if (esDesc) diasTrabajados++;
-                        // Falta → no cuenta (descuento automático)
                     });
 
-                    // Monto: días normales + bono por cada día doble (= 1 día extra de pago)
-                    const montoBase    = Math.round(diasTrabajados * pagoDiario * 100) / 100;
-                    const montoDobles  = Math.round(diasDobles * pagoDiario * 100) / 100;
+                    const montoBase   = Math.round(diasTrabajados * pagoDiario * 100) / 100;
+                    const montoDobles = Math.round(diasDobles * pagoDiario * 100) / 100;
 
-                    // ── Horas extra con reglas de tolerancia ─────────────────
-                    let totalMinutosExtra = 0;
+                    let totalHorasExtra = 0;
                     asistenciasEmp
                         .filter(a => a.fecha >= primerDiaReal && a.fecha <= fechaFin)
                         .forEach(a => {
-                            totalMinutosExtra += calcularMinutosExtra(a, emp.hora_entrada, emp.hora_salida);
+                            totalHorasExtra += calcularHorasExtra(a, emp.hora_salida);
                         });
 
-                    const totalHorasExtra = Math.round((totalMinutosExtra / 60) * 100) / 100;
                     const montoHorasExtra = Math.round(totalHorasExtra * (emp.pago_hora_extra || 0) * 100) / 100;
                     const totalCalculado  = Math.round((montoBase + montoDobles + montoHorasExtra) * 100) / 100;
 
@@ -214,7 +186,6 @@ const DetalleNomina = () => {
                     );
                 });
 
-            // Agrupar por cargo
             const agrupados = {};
             filtrados.forEach(emp => {
                 const nombreCargo = emp.cargos?.nombre_cargo || 'Sin Cargo';
@@ -237,13 +208,13 @@ const DetalleNomina = () => {
         ...emp,
         ultimoDia,
         diasPeriodo,
-        diasTrabajados,  // días reales del calendario
-        diasDobles,      // cuántos de esos fueron en día de descanso
-        montoDobles:     montoDobles ?? 0,
+        diasTrabajados,
+        diasDobles,
+        montoDobles:    montoDobles ?? 0,
         totalHorasExtra,
         montoHorasExtra,
-        totalCalculado:  totalCalculado ?? Math.round(diasTrabajados * pagoDiario * 100) / 100,
-        pagoDiario:      Math.round(pagoDiario * 100) / 100,
+        totalCalculado: totalCalculado ?? Math.round(diasTrabajados * pagoDiario * 100) / 100,
+        pagoDiario:     Math.round(pagoDiario * 100) / 100,
         primerDia,
     });
 
@@ -264,14 +235,13 @@ const DetalleNomina = () => {
         setPagados(prev => new Set([...prev, empleado.id_empleado]));
 
         try {
-            const partes     = fecha.split('-');
-            const anio       = parseInt(partes[0]);
-            const mes        = parseInt(partes[1]);
-            const diaCorte   = parseInt(partes[2]);
-            const mesStr     = String(mes).padStart(2, '0');
-            const ultimoDia  = new Date(anio, mes, 0).getDate();
-            const esFinDeMes = diaCorte === ultimoDia;
-            const modo       = empleado.tipo_pago?.trim().toLowerCase();
+            const partes    = fecha.split('-');
+            const anio      = parseInt(partes[0]);
+            const mes       = parseInt(partes[1]);
+            const diaCorte  = parseInt(partes[2]);
+            const mesStr    = String(mes).padStart(2, '0');
+            const ultimoDia = new Date(anio, mes, 0).getDate();
+            const modo      = empleado.tipo_pago?.trim().toLowerCase();
 
             const fechaInicio = empleado.primerDia || (
                 modo === 'mensual'
@@ -435,7 +405,6 @@ const DetalleNomina = () => {
                 )}
             </div>
 
-            {/* ══ MODAL ══ */}
             {modal && (
                 <div style={overlayStyle} onClick={() => setModal(null)}>
                     <div style={modalStyle} onClick={e => e.stopPropagation()}>
@@ -463,7 +432,7 @@ const DetalleNomina = () => {
                             )}
                             {modal.empleado.totalHorasExtra > 0 && (
                                 <ModalRow label="Horas extra"
-                                    value={`${modal.empleado.totalHorasExtra}h → Q${modal.empleado.montoHorasExtra.toFixed(2)}`}
+                                    value={`${modal.empleado.totalHorasExtra}h × Q${modal.empleado.pago_hora_extra} = Q${modal.empleado.montoHorasExtra.toFixed(2)}`}
                                     color="#ffd166" />
                             )}
                             <div style={{ ...modalInfoRow, borderBottom: 'none' }}>
@@ -496,7 +465,6 @@ const ModalRow = ({ label, value, mono, color }) => (
     </div>
 );
 
-/* ─── Estilos ─── */
 const containerStyle   = { minHeight: '100vh', background: '#1a0a2e', padding: '3rem 2rem', color: '#fff', fontFamily: "'DM Sans',sans-serif", display: 'flex', justifyContent: 'center' };
 const backButtonStyle  = { background: 'transparent', border: 'none', color: '#f67280', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 20, fontWeight: 600, fontSize: 15 };
 const headerStyle      = { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 30 };
