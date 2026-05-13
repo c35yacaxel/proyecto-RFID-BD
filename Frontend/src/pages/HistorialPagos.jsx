@@ -178,19 +178,29 @@ const HistorialPagos = () => {
                 .no-print { display:none !important; }
                 body { background:#fff !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
                 .hp-root { background:#fff !important; color:#111 !important; padding:16px !important; }
-                .hp-card { background:#f4f4f4 !important; border:1px solid #ddd !important; }
+                .hp-card { background:#f4f4f4 !important; border:1px solid #ddd !important; color:#111 !important; }
                 .hp-section { background:#f8f8f8 !important; border:1px solid #ddd !important; }
                 .hp-th { color:#555 !important; }
                 .hp-td { color:#111 !important; }
-
-                [style*="color:#fff"],
-                [style*="color: #fff"],
-                [style*="color:'#fff'"],
-                [style*="rgba(255,255,255"] {
-                    color:#111 !important;
-                }
-
                 .hp-print-header { display:block !important; }
+
+                /* Todos los textos que en pantalla son blancos o claros → oscuros */
+                .hp-root * { color:#111 !important; }
+
+                /* Excepciones: mantener colores de acento para que se distingan */
+                .hp-root [style*="color: rgb(248, 177, 149)"],
+                .hp-root [style*="color:#f8b195"] { color:#c0614a !important; }
+
+                /* Fondos de cards y secciones limpios */
+                .hp-root div[style*="background: rgba(255"] { background:#f5f5f5 !important; }
+                .hp-root div[style*="background:rgba(255"] { background:#f5f5f5 !important; }
+
+                /* Bordes visibles */
+                .hp-root div[style*="border: 1px solid rgba(255"] { border-color:#ddd !important; }
+                .hp-root div[style*="border:1px solid rgba(255"] { border-color:#ddd !important; }
+
+                /* Barras de progreso con fondo visible */
+                .hp-bar { opacity: 0.85 !important; }
             }
             .hp-print-header { display:none; }
         `}</style>
