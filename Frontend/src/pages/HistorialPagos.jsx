@@ -182,6 +182,14 @@ const HistorialPagos = () => {
                 .hp-section { background:#f8f8f8 !important; border:1px solid #ddd !important; }
                 .hp-th { color:#555 !important; }
                 .hp-td { color:#111 !important; }
+
+                [style*="color:#fff"],
+                [style*="color: #fff"],
+                [style*="color:'#fff'"],
+                [style*="rgba(255,255,255"] {
+                    color:#111 !important;
+                }
+
                 .hp-print-header { display:block !important; }
             }
             .hp-print-header { display:none; }
